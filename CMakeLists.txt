@@ -1,54 +1,76 @@
-cmake_minimum_required(VERSION 3.20)
 
-project(mos_vis VERSION 0.1.0 LANGUAGES CXX)
-
-if(POLICY CMP0167)
-  cmake_policy(SET CMP0167 NEW)
-endif()
+cmake_minimum_required(VERSION 3.16)
+project(mos_vis LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-include(GNUInstallDirs)
-enable_testing()
+option(MOS_VIS_BUILD_SERVER "Build mos_vis_server" ON)
 
-option(MOS_VIS_BUILD_TESTS "Build mos-vis tests" ON)
-
+find_package(Threads REQUIRED)
+find_package(Boost REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(nlohmann_json REQUIRED)
-find_package(Boost QUIET COMPONENTS system)
-find_package(PortAudio QUIET)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PORTAUDIO REQUIRED portaudio-2.0)
 
-# Optional RKNN runtime from fixed system paths.
-if(EXISTS "/usr/include/rknn_api.h" AND EXISTS "/usr/lib/librknnrt.so")
-  add_library(rknnrt SHARED IMPORTED)
-  set_target_properties(rknnrt PROPERTIES
-    IMPORTED_LOCATION "/usr/lib/librknnrt.so"
-    INTERFACE_INCLUDE_DIRECTORIES "/usr/include")
-  set(MOS_VIS_HAS_RKNN ON)
-else()
-  set(MOS_VIS_HAS_RKNN OFF)
+add_library(mos_vis_lib
+  src/common/status.cc
+  src/common/logging.cc
+  src/config/app_config.cc
+  src/audio/audio_ring_buffer.cc
+  src/audio/audio_device_selector.cc
+  src/audio/audio_capture.cc
+  src/asr/asr_engine_sherpa.cc
+  src/kws/kws_engine_sherpa.cc
+  src/tts/tts_engine_sherpa.cc
+  src/runtime/session_controller.cc
+  src/agent/voice_interactive_agent.cc
+  src/vad/vad_engine_rknn.cc
+)
+
+target_include_directories(mos_vis_lib
+  PUBLIC
+    ${PROJECT_SOURCE_DIR}/include
+    ${PORTAUDIO_INCLUDE_DIRS}
+)
+
+target_link_libraries(mos_vis_lib
+  PUBLIC
+    Threads::Threads
+    Boost::boost
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    ${PORTAUDIO_LIBRARIES}
+)
+
+target_compile_options(mos_vis_lib PRIVATE ${PORTAUDIO_CFLAGS_OTHER})
+
+set(MOS_VIS_RKNN_HEADER "/usr/include/rknn_api.h")
+set(MOS_VIS_RKNN_LIB "/usr/lib/librknnrt.so")
+if(EXISTS "${MOS_VIS_RKNN_HEADER}" AND EXISTS "${MOS_VIS_RKNN_LIB}")
+  message(STATUS "Using RKNN runtime: ${MOS_VIS_RKNN_LIB}")
+  target_include_directories(mos_vis_lib PUBLIC "/usr/include")
+  target_link_libraries(mos_vis_lib PUBLIC "${MOS_VIS_RKNN_LIB}")
+  target_compile_definitions(mos_vis_lib PUBLIC MOS_VIS_HAS_RKNNRT=1)
 endif()
 
-# Optional sherpa-onnx C++ API from project-local 3rdparty.
-set(SHERPA_ONNX_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/3rdparty/include")
-set(SHERPA_ONNX_LIB "${PROJECT_SOURCE_DIR}/3rdparty/lib/libsherpa-onnx-cxx-api.so")
-if(EXISTS "${SHERPA_ONNX_INCLUDE_DIR}/sherpa-onnx/c-api/cxx-api.h" AND EXISTS "${SHERPA_ONNX_LIB}")
-  add_library(sherpa_onnx_cxx_api SHARED IMPORTED)
-  set_target_properties(sherpa_onnx_cxx_api PROPERTIES
-    IMPORTED_LOCATION "${SHERPA_ONNX_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${SHERPA_ONNX_INCLUDE_DIR}")
-  set(MOS_VIS_HAS_SHERPA_ONNX ON)
-else()
-  set(MOS_VIS_HAS_SHERPA_ONNX OFF)
+set(MOS_VIS_SHERPA_ROOT "${PROJECT_SOURCE_DIR}/3rdparty")
+set(MOS_VIS_SHERPA_INCLUDE_DIR "${MOS_VIS_SHERPA_ROOT}/include")
+set(MOS_VIS_SHERPA_LIB_DIR "${MOS_VIS_SHERPA_ROOT}/lib")
+set(MOS_VIS_SHERPA_C_API_HEADER
+    "${MOS_VIS_SHERPA_INCLUDE_DIR}/sherpa-onnx/c-api/c-api.h")
+set(MOS_VIS_SHERPA_C_API_LIB
+    "${MOS_VIS_SHERPA_LIB_DIR}/libsherpa-onnx-c-api.so")
+if(EXISTS "${MOS_VIS_SHERPA_C_API_HEADER}" AND EXISTS "${MOS_VIS_SHERPA_C_API_LIB}")
+  message(STATUS "Using bundled sherpa-onnx from ${MOS_VIS_SHERPA_ROOT}")
+  target_include_directories(mos_vis_lib PUBLIC "${MOS_VIS_SHERPA_INCLUDE_DIR}")
+  target_link_libraries(mos_vis_lib PUBLIC "${MOS_VIS_SHERPA_C_API_LIB}")
+  target_compile_definitions(mos_vis_lib PUBLIC MOS_VIS_HAS_SHERPA_ONNX=1)
 endif()
 
-add_subdirectory(src)
-
-if(MOS_VIS_BUILD_TESTS)
-  add_subdirectory(tests)
+if(MOS_VIS_BUILD_SERVER)
+  add_executable(mos_vis_server src/server/main.cc)
+  target_link_libraries(mos_vis_server PRIVATE mos_vis_lib)
 endif()
-
-install(FILES config/config.json DESTINATION /etc/mos_vis)
-install(FILES packaging/mos-vis.service DESTINATION /etc/systemd/system)

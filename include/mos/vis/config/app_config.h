@@ -1,113 +1,74 @@
-#pragma once
 
-#include <cstdint>
+#pragma once
 #include <string>
 #include <vector>
+#include "mos/vis/common/status.h"
 
 namespace mos::vis {
 
-struct AgentConfig {
-  bool enable_metrics = true;
-  std::uint32_t asr_listen_timeout_ms = 15000;
-};
-
 struct AudioConfig {
-  std::uint32_t sample_rate_hz = 16000;
+  int sample_rate = 16000;
+  int channels = 1;
+  int capture_chunk_samples = 320;
+  int ring_seconds = 10;
   std::string input_device;
   std::string output_device;
-  std::uint32_t audio_channels = 1;
+  std::string channel_select_mode = "auto_track";
+  int fixed_channel_index = 0;
+  int track_switch_consecutive = 3;
 };
 
 struct VadConfig {
-  float threshold = 0.55f;
-  std::uint32_t min_speech_ms = 180;
-  std::uint32_t min_silence_ms = 300;
-  bool enable_barge_in = true;
-  std::string backend = "rknn";
+  bool enabled = true;
   std::string model_path;
+  float threshold = 0.50F;
+  int window_samples = 512;
+  int hop_samples = 160;
+  int open_frames = 2;
+  int close_frames = 10;
+  int start_frames = 3;
+  int end_frames = 20;
+  int hangover_ms = 160;
 };
 
 struct KwsConfig {
-  std::string keyword = "mos";
-  float trigger_threshold = 0.70f;
-  std::uint32_t pre_roll_ms = 600;
-  std::string backend = "sherpa-onnx";
-  std::string model_path;
+  bool enabled = true;
+  std::string model_dir;
+  int chunk_samples = 320;
+  int preroll_ms = 400;
 };
 
 struct AsrConfig {
-  std::string model_path;
-  std::uint32_t partial_interval_ms = 200;
-  std::string language = "zh-en";
-  std::string backend = "sherpa-onnx";
-};
-
-struct NluConfig {
-  bool critical_confirmation_required = true;
-};
-
-struct ControlConfig {
-  std::string url = "ws://127.0.0.1:9000/ws";
-  std::uint32_t timeout_ms = 1500;
-  std::uint32_t retry_count = 1;
-  std::string request_ack_phrase;
-  bool simulation_mode = false;
+  bool enabled = true;
+  std::string model_dir;
+  int chunk_samples = 320;
+  int preroll_ms = 400;
+  int tail_ms = 240;
 };
 
 struct TtsConfig {
-  std::string model_path;
-  float speed = 1.0f;
-  std::string barge_in_mode = "vad-only";
-  std::string backend = "sherpa-onnx";
+  bool enabled = true;
+  std::string model_dir;
+  bool use_int8 = true;
+  bool fixed_phrase_cache = true;
 };
 
-struct LoggingConfig {
-  std::string level = "info";
-  bool structured = false;
-};
-
-struct RagConfig {
-  bool enabled = false;
-  std::uint32_t top_k = 4;
-  float score_threshold = 0.35f;
-  std::uint32_t max_context_tokens = 1200;
-  std::uint32_t request_timeout_ms = 800;
-  std::string index_path;
-  std::uint32_t cache_ttl_s = 60;
-};
-
-struct RingBufferConfig {
-  std::uint32_t frame_capacity = 8192;
-  std::uint32_t sample_capacity = 8192;
-};
-
-struct WakeAckText {
+struct WakeAckRule {
   std::vector<std::string> keywords;
-  std::string reply_text;
   std::string preset_file;
+  std::string reply_text;
 };
 
 struct AppConfig {
-  AgentConfig agent;
   AudioConfig audio;
-  VadConfig vad;
+  VadConfig vad1;
   KwsConfig kws;
+  VadConfig vad2;
   AsrConfig asr;
-  NluConfig nlu;
-  ControlConfig control;
   TtsConfig tts;
-  LoggingConfig logging;
-  RagConfig rag;
-  RingBufferConfig ring_buffer;
-  std::vector<WakeAckText> wake_ack_text;
+  std::vector<WakeAckRule> wake_ack_text;
 
-  // Compatibility fields for existing call-sites.
-  std::string log_level = "info";
-  std::string control_url = "ws://127.0.0.1:9000/ws";
-  std::string device_id = "mos-device";
-  std::uint32_t sample_rate_hz = 16000;
-  std::uint32_t audio_channels = 1;
-  std::uint32_t ring_buffer_capacity = 8192;
+  static Status LoadFromFile(const std::string& path, AppConfig* config);
 };
 
 }  // namespace mos::vis
