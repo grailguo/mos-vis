@@ -50,6 +50,13 @@ int main(int argc, char* argv[]) {
   const std::string config_path = ResolveConfigPath(argc, argv);
 
   mos::vis::InitializeLogging(true);
+  std::vector<char> exe_buf(4096, '\0');
+  const ssize_t exe_n = ::readlink("/proc/self/exe", exe_buf.data(), exe_buf.size() - 1);
+  if (exe_n > 0) {
+    exe_buf[static_cast<std::size_t>(exe_n)] = '\0';
+    mos::vis::GetLogger()->info("server exe path: {}", exe_buf.data());
+  }
+  mos::vis::GetLogger()->info("server config path: {}", config_path);
 
   mos::vis::AppConfig config;
   mos::vis::Status st = mos::vis::AppConfig::LoadFromFile(config_path, &config);

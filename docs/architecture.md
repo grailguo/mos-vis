@@ -29,6 +29,7 @@ VoiceInteractiveAgent
 ### 2.3 线程模型
 - Main Thread：生命周期、配置、状态调度。
 - Audio Capture Thread：PortAudio 回调写环形缓冲。
+- Audio Playback Thread：TTS outup to Audio output device。
 - Engine Worker Threads：VAD/KWS/ASR/NLU/RAG/TTS。
 - WebSocket I/O Thread：收发、重连、发送队列。
 
@@ -44,6 +45,7 @@ VoiceInteractiveAgent
 - RecognitionPipeline：`LISTENING -> VAD2 -> ASR -> RECOGNIZING`
 - ControlPipeline：`RECOGNIZING -> NLU(control) -> WS -> EXECUTING -> SPEAKING`
 - KnowledgePipeline：`RECOGNIZING -> NLU(knowledge) -> RAG -> SPEAKING`
+- Combined control path：`IDLE -> VAD1 -> KWS -> ACK(TTS) -> LISTENING -> VAD2 -> ASR -> RECOGNIZING -> NLU(control) -> WS -> EXECUTING -> SPEAKING`
 
 打断策略：`interrupt_enabled=true` 时，`SPEAKING` 中检测到唤醒词立即中断并进入 `LISTENING`。
 

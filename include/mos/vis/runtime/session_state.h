@@ -7,6 +7,8 @@ enum class SessionState {
   kPreListening,
   kListening,
   kFinalizing,
+  kRecognizing,
+  kExecuting,
   kThinking,
   kSpeaking,
 };

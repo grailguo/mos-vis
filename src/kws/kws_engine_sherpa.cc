@@ -91,8 +91,9 @@ class SherpaKwsEngine final : public KwsEngine {
     cfg.model_config.debug = 0;
     cfg.max_active_paths = 4;
     cfg.num_trailing_blanks = 1;
-    cfg.keywords_score = 1.5F;
-    cfg.keywords_threshold = 0.25F;
+    // Increase sensitivity for short Mandarin wake words (e.g. "小莫").
+    cfg.keywords_score = 1.0F;
+    cfg.keywords_threshold = 0.20F;
     cfg.keywords_file = keywords_path_.c_str();
 
     spotter_ = SherpaOnnxCreateKeywordSpotter(&cfg);
@@ -107,9 +108,11 @@ class SherpaKwsEngine final : public KwsEngine {
       return Status::Internal("SherpaOnnxCreateKeywordStream failed");
     }
 
-    GetLogger()->info("KWS initialized: model_dir={} keywords_file={}",
+    GetLogger()->info("KWS initialized: model_dir={} keywords_file={} keywords_score={} keywords_threshold={}",
                       config.model_dir,
-                      keywords_path_);
+                      keywords_path_,
+                      cfg.keywords_score,
+                      cfg.keywords_threshold);
     return Status::Ok();
   }
 

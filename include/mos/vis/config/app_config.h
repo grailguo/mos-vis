@@ -1,4 +1,3 @@
-
 #pragma once
 #include <string>
 #include <vector>
@@ -53,6 +52,27 @@ struct TtsConfig {
   bool fixed_phrase_cache = true;
 };
 
+struct ControlConfig {
+  bool enabled = true;
+  std::string host = "127.0.0.1";
+  int port = 9000;
+  std::string path = "/";
+
+  std::string client_name = "MOS-VIS";
+  std::string client_version = "4.1.0.1";
+  std::string client_key;
+  int compatibility_mode = 0;
+  std::string license_user_name = "MOS-VIS";
+  std::string version = "3.6.2.0";
+
+  std::string start_calibration_parameter_json;
+  std::string start_analysis_parameter_json;
+
+  int authorization_timeout_sec = 60;
+  int calibration_duration_sec = 900;
+  int analysis_duration_sec = 900;
+};
+
 struct WakeAckRule {
   std::vector<std::string> keywords;
   std::string preset_file;
@@ -66,6 +86,7 @@ struct AppConfig {
   VadConfig vad2;
   AsrConfig asr;
   TtsConfig tts;
+  ControlConfig control;
   std::vector<WakeAckRule> wake_ack_text;
 
   static Status LoadFromFile(const std::string& path, AppConfig* config);

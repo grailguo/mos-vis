@@ -19,7 +19,7 @@ void InitializeLogging(bool verbose) {
   auto logger = spdlog::stdout_color_mt("mos_vis");
   logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
   logger->set_level(verbose ? spdlog::level::debug : spdlog::level::info);
-  logger->flush_on(spdlog::level::info);
+  logger->flush_on(verbose ? spdlog::level::debug : spdlog::level::info);
   g_logger = logger;
 }
 

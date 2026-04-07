@@ -1,16 +1,13 @@
 #include "mos/vis/tts/tts_engine.h"
 
-#include <atomic>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <system_error>
-#include <unistd.h>
 
+#include "mos/vis/audio/audio_playback.h"
 #include "mos/vis/common/logging.h"
 
 #ifdef MOS_VIS_HAS_SHERPA_ONNX
@@ -22,31 +19,21 @@ namespace {
 
 #ifdef MOS_VIS_HAS_SHERPA_ONNX
 
-std::string EscapeShellSingleQuoted(const std::string& s) {
-  std::string out;
-  out.reserve(s.size() + 8);
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\"'\"'";
-    } else {
-      out.push_back(c);
-    }
-  }
-  return out;
-}
-
 class SherpaTtsEngine final : public TtsEngine {
  public:
   SherpaTtsEngine() = default;
 
   ~SherpaTtsEngine() override {
+    if (playback_ != nullptr) {
+      playback_->Stop();
+    }
     if (tts_ != nullptr) {
       SherpaOnnxDestroyOfflineTts(tts_);
       tts_ = nullptr;
     }
   }
 
-  Status Initialize(const TtsConfig& config) override {
+  Status Initialize(const TtsConfig& config, const AudioConfig& audio_config) override {
     config_ = config;
     const std::filesystem::path model_dir(config.model_dir);
     if (!std::filesystem::exists(model_dir)) {
@@ -103,6 +90,16 @@ class SherpaTtsEngine final : public TtsEngine {
       return Status::Internal("SherpaOnnxCreateOfflineTts failed");
     }
 
+    playback_ = CreateAudioPlayback();
+    Status playback_st = playback_->Initialize(audio_config);
+    if (!playback_st.ok()) {
+      return playback_st;
+    }
+    playback_st = playback_->Start();
+    if (!playback_st.ok()) {
+      return playback_st;
+    }
+
     GetLogger()->info(
         "TTS initialized: model={} use_int8={} int8_size={} data_dir={}",
         model,
@@ -133,53 +130,34 @@ class SherpaTtsEngine final : public TtsEngine {
       return Status::Internal("SherpaOnnxOfflineTtsGenerateWithConfig failed");
     }
 
-    const std::uint64_t id = ++next_id_;
-    const std::string wav_path =
-        "/tmp/mos_vis_tts_" + std::to_string(static_cast<long>(::getpid())) + "_" +
-        std::to_string(static_cast<unsigned long long>(id)) + ".wav";
-
-    const int ok =
-        SherpaOnnxWriteWave(audio->samples, audio->n, audio->sample_rate, wav_path.c_str());
-    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
-
-    if (ok == 0) {
-      return Status::Internal("SherpaOnnxWriteWave failed");
+    Status st = Status::Internal("audio playback is not initialized");
+    if (playback_ != nullptr) {
+      st = playback_->PlaySamples(audio->samples,
+                                  static_cast<std::size_t>(audio->n),
+                                  static_cast<int>(audio->sample_rate));
     }
-
-    const Status st = PlayFile(wav_path);
-    std::remove(wav_path.c_str());
+    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
     return st;
   }
 
   Status PlayFile(const std::string& path) override {
-    if (path.empty()) {
-      return Status::InvalidArgument("TTS file path is empty");
+    if (playback_ == nullptr) {
+      return Status::Internal("audio playback is not initialized");
     }
-    if (!std::filesystem::exists(path)) {
-      return Status::NotFound("TTS file not found: " + path);
-    }
-
-    const std::string cmd = "aplay -q '" + EscapeShellSingleQuoted(path) + "'";
-    const int rc = std::system(cmd.c_str());
-    if (rc != 0) {
-      return Status::Internal("aplay failed with exit code: " + std::to_string(rc));
-    }
-    return Status::Ok();
+    return playback_->PlayWavFile(path);
   }
 
  private:
   TtsConfig config_;
   const SherpaOnnxOfflineTts* tts_ = nullptr;
-  static std::atomic<std::uint64_t> next_id_;
+  std::unique_ptr<AudioPlayback> playback_;
 };
-
-std::atomic<std::uint64_t> SherpaTtsEngine::next_id_{0};
 
 #else
 
 class SherpaTtsEngine final : public TtsEngine {
  public:
-  Status Initialize(const TtsConfig&) override {
+  Status Initialize(const TtsConfig&, const AudioConfig&) override {
     return Status::Internal("Sherpa-ONNX runtime not enabled");
   }
   Status Speak(const std::string&) override {

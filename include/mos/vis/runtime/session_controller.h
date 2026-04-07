@@ -1,6 +1,7 @@
 
 #pragma once
 #include <deque>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -10,7 +11,9 @@
 #include "mos/vis/asr/asr_engine.h"
 #include "mos/vis/common/status.h"
 #include "mos/vis/config/app_config.h"
+#include "mos/vis/control/control_engine.h"
 #include "mos/vis/kws/kws_engine.h"
+#include "mos/vis/nlu/nlu_engine.h"
 #include "mos/vis/runtime/session_state.h"
 #include "mos/vis/tts/tts_engine.h"
 #include "mos/vis/vad/vad_engine.h"
@@ -57,6 +60,9 @@ class SessionController {
   void ProcessKwsStage(TickStats* stats);
   void ProcessVad2Stage();
   void ProcessAsrStage();
+  void ProcessRecognizingStage();
+  void ProcessExecutingStage();
+  void ProcessControlNotificationStage();
   void ProcessTtsStage();
   void EmitFrontendStats(TickStats* stats);
 
@@ -82,6 +88,8 @@ class SessionController {
   std::unique_ptr<VadEngine> vad2_;
   std::unique_ptr<KwsEngine> kws_;
   std::unique_ptr<AsrEngine> asr_;
+  std::unique_ptr<NluEngine> nlu_;
+  std::unique_ptr<ControlEngine> control_;
   std::unique_ptr<TtsEngine> tts_;
   TickStats stats_;
   std::deque<float> kws_preroll_samples_;
@@ -93,6 +101,7 @@ class SessionController {
   std::string kws_pending_json_;
   int kws_pending_age_chunks_ = 0;
   int kws_pending_max_age_chunks_ = 50;
+  std::uint64_t kws_empty_read_ticks_ = 0;
   std::string last_wake_keyword_;
   std::string last_wake_ack_text_;
   std::string last_wake_ack_preset_file_;
@@ -133,6 +142,14 @@ class SessionController {
 
   std::size_t asr_processed_samples_ = 0;
   std::string last_partial_asr_text_;
+  std::chrono::steady_clock::time_point asr_last_text_update_time_ =
+      std::chrono::steady_clock::now();
+  int asr_no_text_timeout_seconds_ = 15;
+  AsrResult pending_asr_final_result_;
+  bool has_pending_asr_final_result_ = false;
+  NluResult pending_nlu_result_;
+  bool has_pending_nlu_result_ = false;
+  std::string pending_control_text_;
   std::optional<std::uint64_t> wake_pos_samples_;
 };
 

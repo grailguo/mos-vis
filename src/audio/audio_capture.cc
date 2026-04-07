@@ -22,8 +22,10 @@ namespace {
 constexpr float kSilenceSample = 0.0F;
 constexpr int kMaxAnalyzeChannels = 8;
 constexpr double kRmsEmaAlpha = 0.2;
-constexpr double kSwitchRatioThreshold = 1.2;
-constexpr double kSwitchRmsDeltaThreshold = 5e-4;
+constexpr double kSwitchRatioThreshold = 1.8;
+constexpr double kSwitchRmsDeltaThreshold = 2e-3;
+constexpr double kSwitchMinCandidateRms = 2e-3;
+constexpr std::uint64_t kEnergyLogIntervalCallbacks = 50;
 
 std::string ToLowerCopy(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
@@ -237,7 +239,7 @@ Status AudioCapture::OpenInputStream() {
   callback_context_.pending_better_channel = -1;
   callback_context_.pending_better_count = 0;
   callback_context_.min_callbacks_between_switches =
-      std::max(1, std::min(10, config_.sample_rate / std::max(config_.capture_chunk_samples * 5, 1)));
+      std::max(10, std::min(40, std::max(1, callback_context_.track_switch_consecutive) * 10));
   callback_context_.rms_accumulator.assign(
       static_cast<std::size_t>(opened_device_input_channels_), 0.0);
   callback_context_.rms_ema.assign(static_cast<std::size_t>(opened_device_input_channels_), 0.0);
@@ -343,6 +345,7 @@ int AudioCapture::PaCallback(const void* input,
   }
 
   int selected_channel = ctx->selected_channel.load();
+  const int previous_selected_channel = selected_channel;
   if (selected_channel < 0 || selected_channel >= channels) {
     selected_channel = best_channel;
   }
@@ -355,7 +358,8 @@ int AudioCapture::PaCallback(const void* input,
       callbacks_since_switch >= static_cast<std::uint64_t>(ctx->min_callbacks_between_switches);
   const bool clearly_stronger =
       (candidate_rms > (current_rms * kSwitchRatioThreshold)) &&
-      ((candidate_rms - current_rms) > kSwitchRmsDeltaThreshold);
+      ((candidate_rms - current_rms) > kSwitchRmsDeltaThreshold) &&
+      (candidate_rms >= kSwitchMinCandidateRms);
 
   switch (ctx->channel_select_mode) {
     case ChannelSelectMode::kFixed: {
@@ -405,62 +409,33 @@ int AudioCapture::PaCallback(const void* input,
     }
   }
 
-  for (int ch = 0; ch < channels; ++ch) {
-    ctx->rms_accumulator[static_cast<std::size_t>(ch)] += rms_values[static_cast<std::size_t>(ch)];
-    ctx->peak_accumulator[static_cast<std::size_t>(ch)] = std::max(
-        ctx->peak_accumulator[static_cast<std::size_t>(ch)],
-        peak_values[static_cast<std::size_t>(ch)]);
-  }
-
   for (std::size_t i = 0; i < frames; ++i) {
     mono[i] = input_samples[i * static_cast<std::size_t>(channels) +
                             static_cast<std::size_t>(selected_channel)];
   }
 
-  ctx->ring->Write(mono.data(), frames);
-
-  const std::uint64_t callback_count = ctx->callback_count.fetch_add(1) + 1U;
-  const int callbacks_per_second =
-      std::max(1, ctx->sample_rate_hz / std::max(ctx->frames_per_buffer, 1));
-
-  if (callback_count % static_cast<std::uint64_t>(callbacks_per_second) == 0U) {
-    if (ctx->channel_select_mode == ChannelSelectMode::kFixed) {
-      const std::size_t idx = static_cast<std::size_t>(selected_channel);
-      const double avg_rms =
-          ctx->rms_accumulator[idx] / static_cast<double>(callbacks_per_second);
-      const float peak = ctx->peak_accumulator[idx];
-      GetLogger()->info("capture channel(fixed): ch{}(rms={},peak={}) selected_channel={}",
-                        selected_channel,
-                        avg_rms,
-                        peak,
-                        selected_channel);
-    } else {
-      std::ostringstream oss;
-      oss << "capture channels: ";
-      for (int ch = 0; ch < channels; ++ch) {
-        const double avg_rms =
-            ctx->rms_accumulator[static_cast<std::size_t>(ch)] /
-            static_cast<double>(callbacks_per_second);
-        const float peak = ctx->peak_accumulator[static_cast<std::size_t>(ch)];
-        oss << "ch" << ch
-            << "(rms=" << avg_rms
-            << ",peak=" << peak << ")";
-        if (ch == selected_channel) {
-          oss << "*";
-        }
-        if (ch + 1 != channels) {
-          oss << " ";
-        }
-      }
-
-      GetLogger()->info("{} selected_channel={}", oss.str(), selected_channel);
-    }
-
-    for (int ch = 0; ch < channels; ++ch) {
-      ctx->rms_accumulator[static_cast<std::size_t>(ch)] = 0.0;
-      ctx->peak_accumulator[static_cast<std::size_t>(ch)] = 0.0F;
-    }
+  if (selected_channel != previous_selected_channel) {
+    GetLogger()->debug("capture selected channel changed: {} -> {} (mode={})",
+                       previous_selected_channel,
+                       selected_channel,
+                       ChannelSelectModeName(ctx->channel_select_mode));
   }
+
+  const std::uint64_t callback_id = ctx->callback_count.fetch_add(1U) + 1U;
+  if ((callback_id % kEnergyLogIntervalCallbacks) == 0U) {
+    std::ostringstream ss;
+    ss << "capture ch_ema=[";
+    for (int ch = 0; ch < channels; ++ch) {
+      if (ch > 0) {
+        ss << ", ";
+      }
+      ss << ch << ":" << ctx->rms_ema[static_cast<std::size_t>(ch)];
+    }
+    ss << "] selected=" << selected_channel << " best=" << best_channel;
+    GetLogger()->debug("{}", ss.str());
+  }
+
+  ctx->ring->Write(mono.data(), frames);
 
   return paContinue;
 }
@@ -475,8 +450,6 @@ Status AudioCapture::Start() {
     running_.store(false);
     return st;
   }
-
-  PrintResolvedDevices();
 
   st = OpenInputStream();
   if (!st.ok()) {

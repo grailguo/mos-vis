@@ -1,4 +1,3 @@
-
 #include "mos/vis/config/app_config.h"
 
 #include <filesystem>
@@ -38,6 +37,13 @@ std::string ResolvePathFromConfigDir(const std::filesystem::path& config_dir,
   }
 
   return p.lexically_normal().string();
+}
+
+std::string JsonFieldToString(const json& node) {
+  if (node.is_string()) {
+    return node.get<std::string>();
+  }
+  return node.dump();
 }
 }
 
@@ -104,6 +110,36 @@ Status AppConfig::LoadFromFile(const std::string& path, AppConfig* config) {
     config->tts.model_dir = ResolvePathFromConfigDir(config_dir, tts.value("model_dir", ""));
     config->tts.use_int8 = tts.value("use_int8", true);
     config->tts.fixed_phrase_cache = tts.value("fixed_phrase_cache", true);
+
+    if (j.contains("control") && j.at("control").is_object()) {
+      const auto& c = j.at("control");
+      config->control.enabled = c.value("enabled", true);
+      config->control.host = c.value("host", "127.0.0.1");
+      config->control.port = c.value("port", 9000);
+      config->control.path = c.value("path", "/");
+      config->control.client_name = c.value("client_name", config->control.client_name);
+      config->control.client_version = c.value("client_version", config->control.client_version);
+      config->control.client_key = c.value("client_key", "");
+      config->control.compatibility_mode = c.value("compatibility_mode", 0);
+      config->control.license_user_name =
+          c.value("license_user_name", config->control.license_user_name);
+      config->control.version = c.value("version", config->control.version);
+      config->control.authorization_timeout_sec =
+          c.value("authorization_timeout_sec", config->control.authorization_timeout_sec);
+      config->control.calibration_duration_sec =
+          c.value("calibration_duration_sec", config->control.calibration_duration_sec);
+      config->control.analysis_duration_sec =
+          c.value("analysis_duration_sec", config->control.analysis_duration_sec);
+
+      if (c.contains("start_calibration_parameter")) {
+        config->control.start_calibration_parameter_json =
+            JsonFieldToString(c.at("start_calibration_parameter"));
+      }
+      if (c.contains("start_analysis_parameter")) {
+        config->control.start_analysis_parameter_json =
+            JsonFieldToString(c.at("start_analysis_parameter"));
+      }
+    }
 
     config->wake_ack_text.clear();
     if (j.contains("wake_ack_text") && j.at("wake_ack_text").is_array()) {

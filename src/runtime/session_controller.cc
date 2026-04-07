@@ -2,6 +2,8 @@
 #include "mos/vis/runtime/session_controller.h"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -59,6 +61,18 @@ const char* Vad2StageName(SessionController::Vad2Stage stage) {
 
 float Clamp01(float v) { return std::max(0.0F, std::min(1.0F, v)); }
 
+std::string TrimAsciiWhitespace(const std::string& s) {
+  std::size_t start = 0;
+  while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])) != 0) {
+    ++start;
+  }
+  std::size_t end = s.size();
+  while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1])) != 0) {
+    --end;
+  }
+  return s.substr(start, end - start);
+}
+
 }  // namespace
 
 SessionController::SessionController(const AppConfig& config,
@@ -110,13 +124,31 @@ Status SessionController::Initialize() {
     }
   }
 
-  tts_ = CreateTtsEngine();
-  if (config_.tts.enabled) {
-    Status st = tts_->Initialize(config_.tts);
+  nlu_ = CreateNluEngine();
+  {
+    NluConfig nlu_config;
+    Status st = nlu_->Initialize(nlu_config);
     if (!st.ok()) {
       return st;
     }
   }
+
+  control_ = CreateControlEngine(config_.control);
+  {
+    Status st = control_->Initialize();
+    if (!st.ok()) {
+      return st;
+    }
+  }
+
+  tts_ = CreateTtsEngine();
+  if (config_.tts.enabled) {
+    Status st = tts_->Initialize(config_.tts, config_.audio);
+    if (!st.ok()) {
+      return st;
+    }
+  }
+  GetLogger()->info("wait for awake");
   return Status::Ok();
 }
 
@@ -148,20 +180,17 @@ void SessionController::HandleKwsHit(const std::string& keyword, const std::stri
   last_wake_ack_text_ = ResolveWakeAckText(keyword);
   last_wake_ack_preset_file_ = ResolveWakeAckPresetFile(keyword);
 
-  GetLogger()->info("KWS hit: keyword='{}' state={}", keyword, static_cast<int>(state_));
-  if (!detail_json.empty()) {
-    GetLogger()->info("KWS detail: {}", detail_json);
-  }
-
-  if (!last_wake_ack_text_.empty()) {
-    GetLogger()->info("Wake ACK text: {}", last_wake_ack_text_);
-  }
+  (void)keyword;
+  (void)detail_json;
   tts_tasks_.push_back(TtsTask{last_wake_ack_preset_file_, last_wake_ack_text_});
   wake_ack_pending_ = true;
-  GetLogger()->info("TTS task queued: size={}", tts_tasks_.size());
+  GetLogger()->info("wakeup hit: {}", keyword);
+  if (!detail_json.empty()) {
+    GetLogger()->debug("kws detail: {}", detail_json);
+  }
 
   state_ = SessionState::kPreListening;
-  GetLogger()->info("Session state -> kPreListening");
+  GetLogger()->info("wait for instruction");
 }
 
 void SessionController::InitializeVad1StateMachine() {
@@ -329,12 +358,12 @@ bool SessionController::UpdateVad1StateMachine(float vad_probability) {
 
   vad1_kws_gate_open_ = (vad1_stage_ != Vad1Stage::kClosed);
   if (vad1_stage_ != prev_stage) {
-    GetLogger()->info("VAD-1 transition: {} -> {} | prob={:.4f} ema={:.4f} gate={}",
-                      Vad1StageName(prev_stage),
-                      Vad1StageName(vad1_stage_),
-                      prob,
-                      vad1_prob_ema_,
-                      vad1_kws_gate_open_ ? "open" : "closed");
+    GetLogger()->debug("vad1 gate transition: {} -> {} | prob={:.4f} ema={:.4f} gate={}",
+                       Vad1StageName(prev_stage),
+                       Vad1StageName(vad1_stage_),
+                       prob,
+                       vad1_prob_ema_,
+                       vad1_kws_gate_open_ ? "open" : "closed");
   }
   return vad1_kws_gate_open_;
 }
@@ -377,11 +406,6 @@ bool SessionController::UpdateVad2StateMachine(float vad_probability) {
   }
 
   if (prev != vad2_stage_) {
-    GetLogger()->info("VAD-2 transition: {} -> {} | prob={:.4f} ema={:.4f}",
-                      Vad2StageName(prev),
-                      Vad2StageName(vad2_stage_),
-                      prob,
-                      vad2_prob_ema_);
     if (vad2_stage_ == Vad2Stage::kSpeech) {
       OnVad2SpeechStart();
     } else {
@@ -405,20 +429,19 @@ void SessionController::OnVad2SpeechStart() {
     asr_reader_.Seek(clamped_start_pos);
     wake_pos_samples_ = clamped_start_pos;
     last_partial_asr_text_.clear();
+    asr_last_text_update_time_ = std::chrono::steady_clock::now();
     if (asr_ != nullptr && config_.asr.enabled) {
       const Status st = asr_->Reset();
       if (!st.ok()) {
         GetLogger()->warn("ASR reset failed: {}", st.message());
       }
     }
-    GetLogger()->info("Session state -> kListening");
   }
 }
 
 void SessionController::OnVad2SpeechEnd() {
   if (state_ == SessionState::kListening) {
     state_ = SessionState::kFinalizing;
-    GetLogger()->info("Session state -> kFinalizing");
   }
 }
 
@@ -444,6 +467,12 @@ void SessionController::ProcessVad1Stage(TickStats* stats) {
     if (!st.ok()) {
       GetLogger()->error("VAD-1 process failed: {}", st.message());
     } else {
+      if ((stats->vad_ticks % 50U) == 0U) {
+        GetLogger()->debug("vad1 prob={:.4f} speech={} gate={}",
+                           vad_result.probability,
+                           vad_result.speech ? 1 : 0,
+                           vad1_kws_gate_open_ ? "open" : "closed");
+      }
       stats->vad_prob_acc += vad_result.probability;
       ++stats->vad_ticks;
       if (vad_result.speech) {
@@ -492,6 +521,31 @@ void SessionController::ProcessAsrStage() {
   if (state_ != SessionState::kListening && state_ != SessionState::kFinalizing) {
     return;
   }
+
+  const auto now = std::chrono::steady_clock::now();
+  if ((now - asr_last_text_update_time_) >=
+      std::chrono::seconds(std::max(1, asr_no_text_timeout_seconds_))) {
+    GetLogger()->warn("ASR no new text for {}s, force session -> kIdle",
+                      asr_no_text_timeout_seconds_);
+    if (asr_ != nullptr && config_.asr.enabled) {
+      const Status st = asr_->Reset();
+      if (!st.ok()) {
+        GetLogger()->warn("ASR reset failed on timeout: {}", st.message());
+      }
+    }
+    state_ = SessionState::kIdle;
+    wake_pos_samples_.reset();
+    asr_processed_samples_ = 0;
+    last_partial_asr_text_.clear();
+    has_pending_asr_final_result_ = false;
+    pending_asr_final_result_ = AsrResult{};
+    has_pending_nlu_result_ = false;
+    pending_nlu_result_ = NluResult{};
+    pending_control_text_.clear();
+    GetLogger()->info("wait for awake");
+    return;
+  }
+
   const std::size_t asr_chunk = static_cast<std::size_t>(std::max(1, config_.asr.chunk_samples));
   const std::size_t max_chunks_per_tick = 8;
   std::vector<float> chunk(asr_chunk, 0.0F);
@@ -515,7 +569,7 @@ void SessionController::ProcessAsrStage() {
     st = asr_->GetResult(&partial);
     if (st.ok() && !partial.text.empty() && partial.text != last_partial_asr_text_) {
       last_partial_asr_text_ = partial.text;
-      GetLogger()->info("ASR partial: {}", partial.text);
+      asr_last_text_update_time_ = std::chrono::steady_clock::now();
     }
     ++consumed_chunks;
   }
@@ -545,22 +599,184 @@ void SessionController::ProcessAsrStage() {
     Status st = asr_->FinalizeAndFlush(&final_result);
     if (!st.ok()) {
       GetLogger()->error("ASR finalize failed: {}", st.message());
-    } else {
-      GetLogger()->info("ASR final: {}", final_result.text);
-      if (!final_result.json.empty()) {
-        GetLogger()->info("ASR final json: {}", final_result.json);
+    }
+
+    std::string final_text = TrimAsciiWhitespace(final_result.text);
+    if (final_text.empty()) {
+      const std::string partial_text = TrimAsciiWhitespace(last_partial_asr_text_);
+      if (!partial_text.empty()) {
+        final_result.text = partial_text;
+        final_text = partial_text;
       }
     }
 
-    state_ = SessionState::kThinking;
-    GetLogger()->info("ASR finalized: processed_samples={} wake_pos={} asr_read_pos={}",
-                      asr_processed_samples_,
-                      wake_pos_samples_.value_or(0),
-                      asr_reader_.pos());
-    state_ = SessionState::kIdle;
+    if (final_text.empty()) {
+      GetLogger()->warn("ASR final text is empty, skip recognizing and return to pre-listening");
+      state_ = SessionState::kPreListening;
+      GetLogger()->info("wait for instruction");
+      wake_pos_samples_.reset();
+      asr_processed_samples_ = 0;
+      last_partial_asr_text_.clear();
+      return;
+    }
+
+    pending_asr_final_result_ = std::move(final_result);
+    has_pending_asr_final_result_ = true;
+    state_ = SessionState::kRecognizing;
     wake_pos_samples_.reset();
     asr_processed_samples_ = 0;
-    GetLogger()->info("Session state -> kIdle");
+    last_partial_asr_text_.clear();
+  }
+}
+
+void SessionController::ProcessRecognizingStage() {
+  if (state_ != SessionState::kRecognizing) {
+    return;
+  }
+
+  if (!has_pending_asr_final_result_) {
+    GetLogger()->warn("Recognizing stage entered without pending ASR result");
+    state_ = SessionState::kIdle;
+    GetLogger()->info("wait for awake");
+    return;
+  }
+
+  const AsrResult& final_result = pending_asr_final_result_;
+  const std::string final_text = TrimAsciiWhitespace(final_result.text);
+  if (final_text.empty()) {
+    GetLogger()->warn("Recognizing skipped: final ASR text is empty");
+    has_pending_asr_final_result_ = false;
+    pending_asr_final_result_ = AsrResult{};
+    state_ = SessionState::kPreListening;
+    GetLogger()->info("wait for instruction");
+    return;
+  }
+  GetLogger()->info("ASR final text: {}", final_text);
+
+  pending_nlu_result_ = NluResult{};
+  has_pending_nlu_result_ = false;
+  pending_control_text_ = final_text;
+  if (nlu_ != nullptr) {
+    Status st = nlu_->Reset();
+    if (!st.ok()) {
+      GetLogger()->warn("NLU reset failed: {}", st.message());
+    }
+    NluResult nlu_result;
+    st = nlu_->Infer(final_result.text, &nlu_result);
+    if (!st.ok()) {
+      GetLogger()->warn("NLU infer failed: {}", st.message());
+    } else {
+      GetLogger()->info("NLU result: intent={} confidence={:.3f}",
+                        nlu_result.intent,
+                        nlu_result.confidence);
+      if (nlu_result.intent.rfind("device.control.", 0) == 0) {
+        GetLogger()->info("NLU matched control command: {}", nlu_result.intent);
+      }
+      pending_nlu_result_ = std::move(nlu_result);
+      has_pending_nlu_result_ = true;
+    }
+  }
+
+  state_ = SessionState::kExecuting;
+
+  has_pending_asr_final_result_ = false;
+  pending_asr_final_result_ = AsrResult{};
+}
+
+void SessionController::ProcessExecutingStage() {
+  if (state_ != SessionState::kExecuting) {
+    return;
+  }
+
+  std::string reply_text;
+  bool is_unknown_intent = true;
+  bool is_control_intent = false;
+  ControlRequest control_request;
+  if (has_pending_nlu_result_) {
+    control_request.intent = pending_nlu_result_.intent;
+    control_request.confidence = pending_nlu_result_.confidence;
+    control_request.text = pending_control_text_;
+    control_request.nlu_json = pending_nlu_result_.json;
+    is_control_intent = control_request.intent.rfind("device.control.", 0) == 0;
+    if (!is_control_intent) {
+      reply_text = pending_nlu_result_.reply_text;
+    }
+    is_unknown_intent = pending_nlu_result_.intent == "unknown";
+  }
+
+  ControlResult control_result;
+  const bool should_execute_control =
+      has_pending_nlu_result_ &&
+      !control_request.intent.empty() &&
+      control_request.intent != "unknown" &&
+      control_request.intent.rfind("device.control.", 0) == 0;
+  if (should_execute_control && control_ != nullptr) {
+    GetLogger()->info("Control execute begin: intent={} text={}",
+                      control_request.intent,
+                      control_request.text);
+    Status st = control_->Reset();
+    if (!st.ok()) {
+      GetLogger()->warn("Control reset failed: {}", st.message());
+    }
+    st = control_->Execute(control_request, &control_result);
+    if (!st.ok()) {
+      GetLogger()->warn("Control execute failed: {}", st.message());
+      reply_text = "控制请求失败：" + st.message();
+    } else {
+      GetLogger()->info("Control execute done: handled={} action={} reply={}",
+                        control_result.handled ? 1 : 0,
+                        control_result.action,
+                        control_result.reply_text);
+      reply_text = control_result.reply_text;
+      if (!control_result.handled && is_unknown_intent == false) {
+        // Known intent from NLU but no control action implemented yet.
+        is_unknown_intent = true;
+      }
+    }
+  } else if (has_pending_nlu_result_) {
+    GetLogger()->info("Control execute skipped: intent={}", control_request.intent);
+  }
+
+  if (!reply_text.empty()) {
+    tts_tasks_.push_back(TtsTask{"", reply_text});
+    has_pending_nlu_result_ = false;
+    pending_nlu_result_ = NluResult{};
+    pending_control_text_.clear();
+    return;
+  }
+
+  if (is_unknown_intent) {
+    has_pending_nlu_result_ = false;
+    pending_nlu_result_ = NluResult{};
+    pending_control_text_.clear();
+    state_ = SessionState::kPreListening;
+    GetLogger()->info("wait for instruction");
+    return;
+  }
+
+  state_ = SessionState::kThinking;
+  has_pending_nlu_result_ = false;
+  pending_nlu_result_ = NluResult{};
+  pending_control_text_.clear();
+  state_ = SessionState::kIdle;
+  GetLogger()->info("wait for awake");
+}
+
+void SessionController::ProcessControlNotificationStage() {
+  if (control_ == nullptr) {
+    return;
+  }
+  ControlResult notify_result;
+  Status st = control_->PollNotification(&notify_result);
+  if (!st.ok()) {
+    GetLogger()->warn("Control notification poll failed: {}", st.message());
+    return;
+  }
+  if (!notify_result.reply_text.empty()) {
+    GetLogger()->info("Control notify: action={} reply={}",
+                      notify_result.action,
+                      notify_result.reply_text);
+    tts_tasks_.push_back(TtsTask{"", notify_result.reply_text});
   }
 }
 
@@ -575,7 +791,6 @@ void SessionController::ProcessTtsStage() {
   tts_tasks_.pop_front();
   tts_task_running_ = true;
   state_ = SessionState::kSpeaking;
-  GetLogger()->info("Session state -> kSpeaking");
   Status st = Status::Ok();
   if (!task.preset_file.empty()) {
     st = tts_->PlayFile(task.preset_file);
@@ -586,8 +801,17 @@ void SessionController::ProcessTtsStage() {
     GetLogger()->warn("TTS task failed: {}", st.message());
   }
   wake_ack_pending_ = false;
-  state_ = SessionState::kPreListening;
-  GetLogger()->info("Session state -> kPreListening");
+  if (has_pending_nlu_result_) {
+    state_ = SessionState::kThinking;
+    has_pending_nlu_result_ = false;
+    pending_nlu_result_ = NluResult{};
+    pending_control_text_.clear();
+    state_ = SessionState::kIdle;
+    GetLogger()->info("wait for awake");
+  } else {
+    state_ = SessionState::kPreListening;
+    GetLogger()->info("wait for instruction");
+  }
   tts_task_running_ = false;
 }
 
@@ -597,7 +821,16 @@ void SessionController::ProcessKwsStage(TickStats* stats) {
   }
 
   const bool gate_just_opened = vad1_kws_gate_open_ && !prev_vad1_kws_gate_open_;
+  const bool gate_just_closed = !vad1_kws_gate_open_ && prev_vad1_kws_gate_open_;
   if (gate_just_opened) {
+    {
+      const Status reset_st = kws_->Reset();
+      if (!reset_st.ok()) {
+        GetLogger()->warn("KWS reset failed on gate open: {}", reset_st.message());
+      } else {
+        GetLogger()->debug("kws stream reset on gate open");
+      }
+    }
     kws_fired_in_current_gate_ = false;
 
     if (kws_pending_hit_ && !kws_fired_in_current_gate_) {
@@ -608,6 +841,14 @@ void SessionController::ProcessKwsStage(TickStats* stats) {
       kws_pending_keyword_.clear();
       kws_pending_json_.clear();
       kws_pending_age_chunks_ = 0;
+    }
+  }
+  if (gate_just_closed) {
+    const Status reset_st = kws_->Reset();
+    if (!reset_st.ok()) {
+      GetLogger()->warn("KWS reset failed on gate close: {}", reset_st.message());
+    } else {
+      GetLogger()->debug("kws stream reset on gate close");
     }
   }
 
@@ -627,6 +868,13 @@ void SessionController::ProcessKwsStage(TickStats* stats) {
     stats->rms_acc += chunk_stats.rms;
     stats->peak_acc += chunk_stats.peak;
     ++stats->chunk_ticks;
+    if ((stats->chunk_ticks % 50U) == 0U) {
+      GetLogger()->debug("kws input: rms={:.4f} peak={:.4f} gate={} state={}",
+                         chunk_stats.rms,
+                         chunk_stats.peak,
+                         vad1_kws_gate_open_ ? "open" : "closed",
+                         static_cast<int>(state_));
+    }
 
     if (kws_preroll_capacity_samples_ > 0U) {
       for (float s : chunk) {
@@ -652,77 +900,53 @@ void SessionController::ProcessKwsStage(TickStats* stats) {
     if (!st.ok()) {
       GetLogger()->error("KWS process failed: {}", st.message());
     } else if (kws_result.detected) {
-      if (vad1_kws_gate_open_ && !kws_fired_in_current_gate_) {
+      GetLogger()->debug("kws detected: keyword='{}' gate={} state={}",
+                         kws_result.keyword,
+                         vad1_kws_gate_open_ ? "open" : "closed",
+                         static_cast<int>(state_));
+
+      // Bypass VAD-1 gate: wake immediately on KWS hit while waiting for wakeup.
+      if (state_ == SessionState::kIdle) {
         ++stats->kws_hit_count;
         kws_fired_in_current_gate_ = true;
-        HandleKwsHit(kws_result.keyword, kws_result.json);
-      } else if (!vad1_kws_gate_open_) {
-        kws_pending_hit_ = true;
-        kws_pending_keyword_ = kws_result.keyword;
-        kws_pending_json_ = kws_result.json;
+        kws_pending_hit_ = false;
+        kws_pending_keyword_.clear();
+        kws_pending_json_.clear();
         kws_pending_age_chunks_ = 0;
+        HandleKwsHit(kws_result.keyword, kws_result.json);
+      } else {
+        GetLogger()->debug("kws hit ignored: state={} (not idle)", static_cast<int>(state_));
       }
     }
     ++processed_chunks;
   }
+
+  if (processed_chunks == 0U) {
+    ++kws_empty_read_ticks_;
+    if ((kws_empty_read_ticks_ % 50U) == 0U) {
+      GetLogger()->debug("kws idle: no chunks (kws_pos={} write_pos={} oldest_pos={})",
+                         kws_reader_.pos(),
+                         ring_->write_pos(),
+                         ring_->OldestPos());
+    }
+  } else {
+    kws_empty_read_ticks_ = 0;
+  }
+
   prev_vad1_kws_gate_open_ = vad1_kws_gate_open_;
 }
 
 void SessionController::EmitFrontendStats(TickStats* stats) {
-  const int chunk_logs_per_second =
-      std::max(1, config_.audio.sample_rate / std::max(1, config_.kws.chunk_samples));
-  if (stats->chunk_ticks - stats->last_chunk_log_tick <
-      static_cast<std::uint64_t>(chunk_logs_per_second)) {
-    return;
-  }
-
-  const std::uint64_t chunk_delta = stats->chunk_ticks - stats->last_chunk_log_tick;
-  const double avg_rms = (chunk_delta > 0U) ? (stats->rms_acc / static_cast<double>(chunk_delta)) : 0.0;
-  const double avg_peak = (chunk_delta > 0U) ? (stats->peak_acc / static_cast<double>(chunk_delta)) : 0.0;
-  const double avg_vad_prob =
-      (stats->vad_ticks > 0U) ? (stats->vad_prob_acc / static_cast<double>(stats->vad_ticks)) : 0.0;
-  const double raw_speech_ratio =
-      (stats->vad_ticks > 0U)
-          ? (static_cast<double>(stats->raw_speech_count) / static_cast<double>(stats->vad_ticks))
-          : 0.0;
-  const double vad_gate_ratio =
-      (stats->vad_ticks > 0U)
-          ? (static_cast<double>(stats->vad_gate_open_count) / static_cast<double>(stats->vad_ticks))
-          : 0.0;
-
-  GetLogger()->info(
-      "frontend stats: avg_rms={:.6f} avg_peak={:.6f} vad_prob={:.4f} "
-      "vad_raw_ratio={:.2f} vad_gate_ratio={:.2f} vad_stage={} kws_gate={} kws_hits={} "
-      "vad2_stage={} session_state={} write_pos={} kws_read_pos={} vad1_read_pos={} asr_read_pos={}",
-      avg_rms,
-      avg_peak,
-      avg_vad_prob,
-      raw_speech_ratio,
-      vad_gate_ratio,
-      Vad1StageName(vad1_stage_),
-      vad1_kws_gate_open_ ? "open" : "closed",
-      stats->kws_hit_count,
-      Vad2StageName(vad2_stage_),
-      static_cast<int>(state_),
-      ring_->write_pos(),
-      kws_reader_.pos(),
-      vad1_reader_.pos(),
-      asr_reader_.pos());
-
-  stats->last_chunk_log_tick = stats->chunk_ticks;
-  stats->rms_acc = 0.0;
-  stats->peak_acc = 0.0;
-  stats->vad_prob_acc = 0.0;
-  stats->vad_gate_open_count = 0;
-  stats->raw_speech_count = 0;
-  stats->kws_hit_count = 0;
-  stats->vad_ticks = 0;
+  (void)stats;
 }
 
 void SessionController::Tick() {
+  ProcessControlNotificationStage();
   ProcessVad1Stage(&stats_);
   ProcessKwsStage(&stats_);
   ProcessVad2Stage();
+  ProcessRecognizingStage();
+  ProcessExecutingStage();
   ProcessAsrStage();
   ProcessTtsStage();
   EmitFrontendStats(&stats_);

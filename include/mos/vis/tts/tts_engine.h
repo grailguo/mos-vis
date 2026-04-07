@@ -12,7 +12,7 @@ class TtsEngine {
  public:
   virtual ~TtsEngine() = default;
 
-  virtual Status Initialize(const TtsConfig& config) = 0;
+  virtual Status Initialize(const TtsConfig& config, const AudioConfig& audio_config) = 0;
   virtual Status Speak(const std::string& text) = 0;
   virtual Status PlayFile(const std::string& path) = 0;
 };
