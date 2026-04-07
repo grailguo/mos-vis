@@ -5,7 +5,7 @@
 适用平台：RK3588 + Ubuntu 20.04 aarch64
 
 ## 文档导航
-- 总规格（本文件）：`SystemDesgin.md`
+- 总规格（本文件）：`SystemDesign.md`
 - 架构专题：`docs/architecture.md`
 - 可靠性专题：`docs/reliability.md`
 - 安全专题：`docs/security.md`

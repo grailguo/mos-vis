@@ -1,6 +1,6 @@
 # MOS-VIS 架构设计（Architecture Spec）
 
-来源：`SystemDesgin.md` 专题拆分  
+来源：`SystemDesign.md` 专题拆分  
 范围：系统目标、分层架构、状态机、接口与性能基线
 
 ## 1. 目标与约束
@@ -100,6 +100,6 @@ VoiceInteractiveAgent
 - 平均耗时、P95/P99、CPU/NPU 占用、峰值内存、吞吐。
 
 ## 8. 相关文档
-- 总规格：[SystemDesgin.md](../SystemDesgin.md)
+- 总规格：[SystemDesign.md](../SystemDesign.md)
 - 可靠性专题：[reliability.md](./reliability.md)
 - 安全专题：[security.md](./security.md)

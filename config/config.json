@@ -49,6 +49,12 @@
     "use_int8": true,
     "fixed_phrase_cache": true
   },
+  "nlu": {
+    "enabled": true,
+    "model_dir": "./models/nlu",
+    "provider": "cpu",
+    "num_threads": 1
+  },
   "control": {
     "enabled": true,
     "host": "172.16.1.10",

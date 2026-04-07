@@ -126,8 +126,7 @@ Status SessionController::Initialize() {
 
   nlu_ = CreateNluEngine();
   {
-    NluConfig nlu_config;
-    Status st = nlu_->Initialize(nlu_config);
+    Status st = nlu_->Initialize(config_.nlu);
     if (!st.ok()) {
       return st;
     }

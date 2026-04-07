@@ -52,6 +52,13 @@ struct TtsConfig {
   bool fixed_phrase_cache = true;
 };
 
+struct NluConfig {
+  bool enabled = true;
+  std::string model_dir;
+  std::string provider = "cpu";
+  int num_threads = 1;
+};
+
 struct ControlConfig {
   bool enabled = true;
   std::string host = "127.0.0.1";
@@ -86,6 +93,7 @@ struct AppConfig {
   VadConfig vad2;
   AsrConfig asr;
   TtsConfig tts;
+  NluConfig nlu;
   ControlConfig control;
   std::vector<WakeAckRule> wake_ack_text;
 

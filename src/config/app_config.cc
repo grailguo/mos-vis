@@ -111,6 +111,19 @@ Status AppConfig::LoadFromFile(const std::string& path, AppConfig* config) {
     config->tts.use_int8 = tts.value("use_int8", true);
     config->tts.fixed_phrase_cache = tts.value("fixed_phrase_cache", true);
 
+    if (j.contains("nlu") && j.at("nlu").is_object()) {
+      const auto& nlu = j.at("nlu");
+      config->nlu.enabled = nlu.value("enabled", true);
+      config->nlu.model_dir = ResolvePathFromConfigDir(config_dir, nlu.value("model_dir", ""));
+      config->nlu.provider = nlu.value("provider", "cpu");
+      config->nlu.num_threads = nlu.value("num_threads", 1);
+    } else {
+      config->nlu.enabled = true;
+      config->nlu.model_dir = "";
+      config->nlu.provider = "cpu";
+      config->nlu.num_threads = 1;
+    }
+
     if (j.contains("control") && j.at("control").is_object()) {
       const auto& c = j.at("control");
       config->control.enabled = c.value("enabled", true);

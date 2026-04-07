@@ -1,6 +1,6 @@
 # MOS-VIS 可靠性与可运维设计（Reliability Spec）
 
-来源：`SystemDesgin.md` 专题拆分  
+来源：`SystemDesign.md` 专题拆分  
 范围：容错、降级、恢复、测试、运维升级
 
 ## 1. 可靠性目标
@@ -93,6 +93,6 @@ StartLimitIntervalSec=60
 - P2：功耗模型精化与长周期稳定性扩展。
 
 ## 8. 相关文档
-- 总规格：[SystemDesgin.md](../SystemDesgin.md)
+- 总规格：[SystemDesign.md](../SystemDesign.md)
 - 架构专题：[architecture.md](./architecture.md)
 - 安全专题：[security.md](./security.md)

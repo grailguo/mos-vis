@@ -1,6 +1,6 @@
 # MOS-VIS 安全与合规设计（Security Spec）
 
-来源：`SystemDesgin.md` 专题拆分  
+来源：`SystemDesign.md` 专题拆分  
 范围：传输安全、访问控制、隐私、合规、供应链
 
 ## 1. 安全目标
@@ -91,6 +91,6 @@
 - P2：供应链安全与认证体系扩展。
 
 ## 9. 相关文档
-- 总规格：[SystemDesgin.md](../SystemDesgin.md)
+- 总规格：[SystemDesign.md](../SystemDesign.md)
 - 架构专题：[architecture.md](./architecture.md)
 - 可靠性专题：[reliability.md](./reliability.md)

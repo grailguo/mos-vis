@@ -67,5 +67,6 @@ Makefile
 .idea/
 .vscode/
 .vs/
+.claude/
 3rdparty/
 models/
