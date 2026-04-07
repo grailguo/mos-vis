@@ -9,7 +9,6 @@ enum class SessionState {
   kFinalizing,
   kRecognizing,
   kExecuting,
-  kThinking,
   kSpeaking,
 };
 }  // namespace mos::vis

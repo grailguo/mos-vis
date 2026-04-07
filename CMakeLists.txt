@@ -29,6 +29,16 @@ add_library(mos_vis_lib
   src/tts/tts_engine_sherpa.cc
   src/nlu/nlu_engine_simple.cc
   src/runtime/session_controller.cc
+  src/runtime/pipeline_scheduler.cc
+  src/runtime/stage_factory.cc
+  src/runtime/stages/vad1_stage.cc
+  src/runtime/stages/kws_stage.cc
+  src/runtime/stages/vad2_stage.cc
+  src/runtime/stages/asr_stage.cc
+  src/runtime/stages/recognizing_stage.cc
+  src/runtime/stages/executing_stage.cc
+  src/runtime/stages/tts_stage.cc
+  src/runtime/stages/control_notification_stage.cc
   src/agent/voice_interactive_agent.cc
   src/vad/vad_engine_rknn.cc
 )
