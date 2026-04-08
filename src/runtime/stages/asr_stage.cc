@@ -9,12 +9,23 @@
 #include <vector>
 
 #include "mos/vis/common/logging.h"
+#include "mos/vis/runtime/subsm/hotspot_subsms.h"
 
 namespace mos::vis {
 
 namespace {
 
 constexpr const char* kLogTag = "AsrStage";
+
+LogContext MakeLogCtx(const SessionContext& context) {
+  LogContext ctx;
+  ctx.module = kLogTag;
+  ctx.session = context.session_id;
+  ctx.turn = context.turn_id;
+  ctx.state = std::to_string(static_cast<int>(context.state));
+  ctx.req = context.current_control_request_id;
+  return ctx;
+}
 
 // Helper to trim ASCII whitespace from a string (copied from session_controller.cc)
 std::string TrimAsciiWhitespace(const std::string& s) {
@@ -51,6 +62,7 @@ Status AsrStage::OnAttach(SessionContext& context) {
   asr_state.last_text_update_time = std::chrono::steady_clock::now();
   asr_state.no_text_timeout_seconds = 15;
   asr_state.has_pending_final_result = false;
+  context.subsm_state.asr = subsm::AsrState::kListening;
 
   // Initialize NLU control state
   auto& nlu_control = context.nlu_control_state;
@@ -64,8 +76,10 @@ Status AsrStage::OnAttach(SessionContext& context) {
   // Pre-allocate buffer
   asr_chunk_buffer_.resize(asr_chunk_samples_, 0.0F);
 
-  GetLogger()->info("{}: Initialized: chunk_samples={} timeout={}s",
-                    kLogTag, asr_chunk_samples_, asr_state.no_text_timeout_seconds);
+  LogInfo(logevent::kSystemBoot, MakeLogCtx(context),
+          {Kv("detail", "asr_stage_init"),
+           Kv("chunk_samples", asr_chunk_samples_),
+           Kv("timeout_sec", asr_state.no_text_timeout_seconds)});
 
   return Status::Ok();
 }
@@ -85,10 +99,26 @@ Status AsrStage::Process(SessionContext& context) {
     return Status::Ok();
   }
 
+  // Align ASR reader to the speech-start position captured by Vad2Stage.
+  // Without this, ASR may decode stale ring-buffer audio first and miss
+  // the beginning of the first command after wake.
+  if (context.nlu_control_state.wake_pos_samples.has_value()) {
+    const std::uint64_t wake_pos = *context.nlu_control_state.wake_pos_samples;
+    const std::uint64_t oldest = context.ring_buffer->OldestPos();
+    const std::uint64_t clamped_pos = std::max(oldest, wake_pos);
+    reader_->Seek(clamped_pos);
+    context.nlu_control_state.wake_pos_samples.reset();
+    LogDebug(logevent::kAsrPartial, MakeLogCtx(context),
+             {Kv("detail", "asr_reader_seek"),
+              Kv("seek_pos", clamped_pos),
+              Kv("oldest", oldest)});
+  }
+
   // Check for timeout
   HandleNoTextTimeout(context);
-  if (context.state == SessionState::kIdle) {
-    // Timeout forced idle; nothing more to do this tick
+  if (context.state != SessionState::kListening &&
+      context.state != SessionState::kFinalizing) {
+    // Sub-state machine may have redirected to pre-listening/idle.
     return Status::Ok();
   }
 
@@ -121,25 +151,11 @@ void AsrStage::HandleNoTextTimeout(SessionContext& context) {
   auto& asr_state = context.asr_state;
   if ((now - asr_state.last_text_update_time) >=
       std::chrono::seconds(std::max(1, asr_state.no_text_timeout_seconds))) {
-    GetLogger()->warn("{}: no new text for {}s, force session -> kIdle",
-                      kLogTag, asr_state.no_text_timeout_seconds);
-    if (context.asr != nullptr && context.config.asr.enabled) {
-      Status st = context.asr->Reset();
-      if (!st.ok()) {
-        GetLogger()->warn("{}: ASR reset failed on timeout: {}", kLogTag, st.message());
-      }
-    }
-    context.state = SessionState::kIdle;
-    context.nlu_control_state.wake_pos_samples.reset();
-    asr_state.processed_samples = 0;
-    asr_state.last_partial_text.clear();
-    asr_state.has_pending_final_result = false;
-    context.nlu_control_state.has_pending_asr_final_result = false;
-    context.nlu_control_state.pending_asr_final_result.reset();
-    context.nlu_control_state.has_pending_nlu_result = false;
-    context.nlu_control_state.pending_nlu_result.reset();
-    context.nlu_control_state.pending_control_text.clear();
-    GetLogger()->info("{}: wait for awake", kLogTag);
+    LogWarn(logevent::kAsrTimeout, MakeLogCtx(context),
+            {Kv("detail", "no_new_text_timeout"),
+             Kv("timeout_sec", asr_state.no_text_timeout_seconds)});
+    context.local_events.asr_events.push_back(subsm::AsrEvent::kAsrTimeout);
+    ConsumeAsrEvents(context, "");
   }
 }
 
@@ -154,12 +170,16 @@ Status AsrStage::ProcessAudioChunks(SessionContext& context) {
     Status st = context.asr->AcceptAudio(asr_chunk_buffer_.data(),
                                          asr_chunk_buffer_.size());
     if (!st.ok()) {
-      GetLogger()->error("{}: ASR accept failed: {}", kLogTag, st.message());
+      LogError(logevent::kAsrError, MakeLogCtx(context), {Kv("detail", "accept_failed"), Kv("err", st.message())});
+      context.local_events.asr_events.push_back(subsm::AsrEvent::kAsrError);
+      ConsumeAsrEvents(context, "");
       break;
     }
     st = context.asr->DecodeAvailable();
     if (!st.ok()) {
-      GetLogger()->error("{}: ASR decode failed: {}", kLogTag, st.message());
+      LogError(logevent::kAsrError, MakeLogCtx(context), {Kv("detail", "decode_failed"), Kv("err", st.message())});
+      context.local_events.asr_events.push_back(subsm::AsrEvent::kAsrError);
+      ConsumeAsrEvents(context, "");
       break;
     }
 
@@ -168,7 +188,8 @@ Status AsrStage::ProcessAudioChunks(SessionContext& context) {
     if (st.ok() && !partial.text.empty() && partial.text != asr_state.last_partial_text) {
       asr_state.last_partial_text = partial.text;
       asr_state.last_text_update_time = std::chrono::steady_clock::now();
-      GetLogger()->debug("{}: partial text: {}", kLogTag, partial.text);
+      LogDebug(logevent::kAsrPartial, MakeLogCtx(context),
+               {Kv("text", MaskSummary(partial.text, 16))});
     }
     ++consumed_chunks;
   }
@@ -187,12 +208,12 @@ Status AsrStage::ProcessTailAudio(SessionContext& context, std::size_t tail_samp
     Status st = context.asr->AcceptAudio(asr_chunk_buffer_.data(),
                                          asr_chunk_buffer_.size());
     if (!st.ok()) {
-      GetLogger()->error("{}: ASR accept failed while tailing: {}", kLogTag, st.message());
+      LogError(logevent::kAsrError, MakeLogCtx(context), {Kv("detail", "accept_failed_tail"), Kv("err", st.message())});
       break;
     }
     st = context.asr->DecodeAvailable();
     if (!st.ok()) {
-      GetLogger()->error("{}: ASR decode failed while tailing: {}", kLogTag, st.message());
+      LogError(logevent::kAsrError, MakeLogCtx(context), {Kv("detail", "decode_failed_tail"), Kv("err", st.message())});
       break;
     }
   }
@@ -203,7 +224,7 @@ Status AsrStage::FinalizeAsr(SessionContext& context) {
   AsrResult final_result;
   Status st = context.asr->FinalizeAndFlush(&final_result);
   if (!st.ok()) {
-    GetLogger()->error("{}: ASR finalize failed: {}", kLogTag, st.message());
+    LogError(logevent::kAsrError, MakeLogCtx(context), {Kv("detail", "finalize_failed"), Kv("err", st.message())});
     return st;
   }
 
@@ -217,29 +238,83 @@ Status AsrStage::FinalizeAsr(SessionContext& context) {
   }
 
   if (final_text.empty()) {
-    GetLogger()->warn("{}: final text is empty, skip recognizing and return to pre‑listening",
-                      kLogTag);
-    context.state = SessionState::kPreListening;
-    GetLogger()->info("{}: wait for instruction", kLogTag);
-    context.nlu_control_state.wake_pos_samples.reset();
-    context.asr_state.processed_samples = 0;
-    context.asr_state.last_partial_text.clear();
-    context.asr_state.has_pending_final_result = false;
+    LogWarn(logevent::kAsrFinalEmpty, MakeLogCtx(context), {Kv("detail", "final_text_empty")});
+    context.local_events.asr_events.push_back(subsm::AsrEvent::kAsrFinalEmpty);
+    ConsumeAsrEvents(context, "");
     return Status::Ok();
   }
 
-  GetLogger()->info("{}: final text: {}", kLogTag, final_text);
+  LogInfo(logevent::kAsrFinal, MakeLogCtx(context),
+          {Kv("text", MaskSummary(final_text, 16))});
 
-  // Store final result in shared context
   context.nlu_control_state.pending_asr_final_result = std::move(final_result);
   context.nlu_control_state.has_pending_asr_final_result = true;
-  context.state = SessionState::kRecognizing;
-  context.nlu_control_state.wake_pos_samples.reset();
-  context.asr_state.processed_samples = 0;
-  context.asr_state.last_partial_text.clear();
-  context.asr_state.has_pending_final_result = false;
+  context.local_events.asr_events.push_back(subsm::AsrEvent::kAsrFinalNonEmpty);
+  ConsumeAsrEvents(context, final_text);
 
   return Status::Ok();
+}
+
+void AsrStage::ConsumeAsrEvents(SessionContext& context, const std::string& final_text) {
+  auto& events = context.local_events.asr_events;
+  while (!events.empty()) {
+    const subsm::AsrEvent event = events.front();
+    events.pop_front();
+
+    if (context.state == SessionState::kFinalizing) {
+      context.subsm_state.asr = subsm::AsrState::kFinalizing;
+    } else if (context.state == SessionState::kRecognizing) {
+      context.subsm_state.asr = subsm::AsrState::kRecognizing;
+    } else {
+      context.subsm_state.asr = subsm::AsrState::kListening;
+    }
+
+    const subsm::AsrState prev = context.subsm_state.asr;
+    const subsm::AsrDecision decision = subsm::StepAsr(prev, event);
+    context.subsm_state.asr = decision.next_state;
+
+    LogDebug(logevent::kSubsmTransition, MakeLogCtx(context),
+             {Kv("subsm", "asr"),
+              Kv("from", static_cast<int>(prev)),
+              Kv("ev", static_cast<int>(event)),
+              Kv("to", static_cast<int>(decision.next_state)),
+              Kv("action", static_cast<int>(decision.action)),
+              Kv("final_text_empty", final_text.empty() ? 1 : 0)});
+
+    if (decision.action == subsm::AsrAction::kToRecognizing) {
+      context.state = SessionState::kRecognizing;
+      context.nlu_control_state.wake_pos_samples.reset();
+      context.asr_state.processed_samples = 0;
+      context.asr_state.last_partial_text.clear();
+      context.asr_state.has_pending_final_result = false;
+      continue;
+    }
+
+    if (decision.action == subsm::AsrAction::kPrepareRetryReply) {
+      if (context.asr != nullptr && context.config.asr.enabled) {
+        Status st = context.asr->Reset();
+        if (!st.ok()) {
+          GetLogger()->warn("{}: ASR reset failed in retry path: {}", kLogTag, st.message());
+        }
+      }
+      context.nlu_control_state.wake_pos_samples.reset();
+      context.asr_state.processed_samples = 0;
+      context.asr_state.last_partial_text.clear();
+      context.asr_state.has_pending_final_result = false;
+      context.nlu_control_state.has_pending_asr_final_result = false;
+      context.nlu_control_state.pending_asr_final_result.reset();
+      context.state = SessionState::kPreListening;
+      ScheduleRetryReply(context);
+      continue;
+    }
+  }
+}
+
+void AsrStage::ScheduleRetryReply(SessionContext& context) {
+  context.keep_session_open = true;
+  context.reply_tts_started = false;
+  ++context.reply_playback_token;
+  context.tts_state.tasks.push_back(TtsTask{"", "没听清，请再说一次。"});
 }
 
 }  // namespace mos::vis

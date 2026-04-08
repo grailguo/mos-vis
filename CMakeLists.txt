@@ -31,6 +31,7 @@ add_library(mos_vis_lib
   src/runtime/session_controller.cc
   src/runtime/pipeline_scheduler.cc
   src/runtime/stage_factory.cc
+  src/runtime/subsm/hotspot_subsms.cc
   src/runtime/stages/vad1_stage.cc
   src/runtime/stages/kws_stage.cc
   src/runtime/stages/vad2_stage.cc
@@ -89,3 +90,9 @@ if(MOS_VIS_BUILD_SERVER)
   add_executable(mos_vis_server src/server/main.cc)
   target_link_libraries(mos_vis_server PRIVATE mos_vis_lib)
 endif()
+
+add_custom_target(check_logging_usage
+  COMMAND bash ${PROJECT_SOURCE_DIR}/scripts/check_logging_usage.sh
+  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+  COMMENT "Checking direct GetLogger() usage against allowlist"
+)

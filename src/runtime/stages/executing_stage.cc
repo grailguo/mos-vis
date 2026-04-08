@@ -12,6 +12,16 @@ namespace {
 
 constexpr const char* kLogTag = "ExecutingStage";
 
+LogContext MakeLogCtx(const SessionContext& context) {
+  LogContext ctx;
+  ctx.module = kLogTag;
+  ctx.session = context.session_id;
+  ctx.turn = context.turn_id;
+  ctx.state = std::to_string(static_cast<int>(context.state));
+  ctx.req = context.current_control_request_id;
+  return ctx;
+}
+
 // Helper to trim ASCII whitespace
 std::string TrimAsciiWhitespace(const std::string& s) {
   std::size_t start = 0;
@@ -49,7 +59,7 @@ Status ExecutingStage::Process(SessionContext& context) {
   if (!nlu_control.has_pending_nlu_result) {
     // No NLU result pending; transition to idle
     context.state = SessionState::kIdle;
-    GetLogger()->info("{}: wait for awake", kLogTag);
+    LogInfo(logevent::kSessionEnd, MakeLogCtx(context), {Kv("reason", "no_pending_nlu_result")});
     return Status::Ok();
   }
 
@@ -57,6 +67,7 @@ Status ExecutingStage::Process(SessionContext& context) {
   const std::string intent = nlu_result.intent;
   const bool is_control_intent = intent.rfind("device.control.", 0) == 0;
   const bool is_unknown_intent = intent == "unknown";
+  context.keep_session_open = true;
 
   std::string reply_text;
   if (!is_control_intent && !nlu_result.reply_text.empty()) {
@@ -68,6 +79,8 @@ Status ExecutingStage::Process(SessionContext& context) {
   control_request.confidence = nlu_result.confidence;
   control_request.text = nlu_control.pending_control_text;
   control_request.nlu_json = nlu_result.json;
+  control_request.session_id = context.session_id;
+  control_request.turn_id = context.turn_id;
 
   // Execute control command if applicable
   const bool should_execute_control =
@@ -79,11 +92,17 @@ Status ExecutingStage::Process(SessionContext& context) {
       // reply_text may have been set to error message
     }
   } else if (nlu_control.has_pending_nlu_result) {
-    GetLogger()->info("{}: control execute skipped: intent={}", kLogTag, intent);
+    LogInfo(logevent::kIntentRoute, MakeLogCtx(context),
+            {Kv("detail", "control_execute_skipped"), Kv("intent", intent)});
   }
 
   // Schedule TTS reply if we have one
   if (!reply_text.empty()) {
+    if (intent == "device.control.stop_analysis") {
+      context.keep_session_open = false;
+    }
+    context.reply_tts_started = false;
+    ++context.reply_playback_token;
     context.tts_state.tasks.push_back(TtsTask{"", reply_text});
     nlu_control.has_pending_nlu_result = false;
     nlu_control.pending_nlu_result.reset();
@@ -99,7 +118,8 @@ Status ExecutingStage::Process(SessionContext& context) {
     nlu_control.pending_nlu_result.reset();
     nlu_control.pending_control_text.clear();
     context.state = SessionState::kPreListening;
-    GetLogger()->info("{}: wait for instruction", kLogTag);
+    LogInfo(logevent::kStateTransition, MakeLogCtx(context),
+            {Kv("layer", "main"), Kv("from", "executing"), Kv("to", "pre_listening"), Kv("reason", "unknown_intent")});
     return Status::Ok();
   }
 
@@ -109,31 +129,35 @@ Status ExecutingStage::Process(SessionContext& context) {
   nlu_control.pending_nlu_result.reset();
   nlu_control.pending_control_text.clear();
   context.state = SessionState::kIdle;
-  GetLogger()->info("{}: wait for awake", kLogTag);
+  LogInfo(logevent::kSessionEnd, MakeLogCtx(context),
+          {Kv("reason", "known_intent_no_reply")});
   return Status::Ok();
 }
 
 Status ExecutingStage::ExecuteControl(SessionContext& context,
                                       const ControlRequest& request,
                                       std::string& reply_text) {
-  GetLogger()->info("{}: control execute begin: intent={} text={}",
-                    kLogTag, request.intent, request.text);
+  const ScopedTimer timer;
+  LogInfo(logevent::kControlSend, MakeLogCtx(context),
+          {Kv("intent", request.intent), Kv("text", MaskSummary(request.text, 20))});
   Status st = context.control->Reset();
   if (!st.ok()) {
-    GetLogger()->warn("{}: control reset failed: {}", kLogTag, st.message());
+    LogWarn(logevent::kControlRetry, MakeLogCtx(context),
+            {Kv("detail", "control_reset_failed"), Kv("err", st.message())});
   }
   ControlResult control_result;
   st = context.control->Execute(request, &control_result);
   if (!st.ok()) {
-    GetLogger()->warn("{}: control execute failed: {}", kLogTag, st.message());
+    LogError(logevent::kControlTimeout, MakeLogCtx(context),
+             {Kv("detail", "control_execute_failed"), Kv("err", st.message())});
     reply_text = "控制请求失败：" + st.message();
     return st;
   }
-  GetLogger()->info("{}: control execute done: handled={} action={} reply={}",
-                    kLogTag,
-                    control_result.handled ? 1 : 0,
-                    control_result.action,
-                    control_result.reply_text);
+  LogInfo(logevent::kControlAck, MakeLogCtx(context),
+          {Kv("handled", control_result.handled ? 1 : 0),
+           Kv("action_name", control_result.action),
+           Kv("ack_ms", timer.ElapsedMs())});
+  context.current_control_request_id = control_result.request_id;
   reply_text = control_result.reply_text;
   // If intent was known but not handled, treat as unknown (handled by caller)
   // This logic is in the original but we rely on caller's is_unknown_intent flag.

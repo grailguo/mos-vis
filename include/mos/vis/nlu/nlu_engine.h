@@ -4,15 +4,9 @@
 #include <string>
 
 #include "mos/vis/common/status.h"
+#include "mos/vis/config/app_config.h"
 
 namespace mos::vis {
-
-struct NluConfig {
-  bool enabled = true;
-  std::string model_dir;
-  std::string provider = "cpu";
-  int num_threads = 1;
-};
 
 struct NluResult {
   std::string intent;

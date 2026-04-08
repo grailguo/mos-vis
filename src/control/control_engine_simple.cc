@@ -30,6 +30,37 @@ namespace {
 using Json = nlohmann::json;
 namespace websocket = boost::beast::websocket;
 using tcp = boost::asio::ip::tcp;
+struct RequestContext;
+
+LogContext MakeLogCtx() {
+  LogContext ctx;
+  ctx.module = "ControlEngine";
+  return ctx;
+}
+
+LogContext MakeLogCtx(const std::shared_ptr<RequestContext>& request_context);
+
+std::string_view EventForControlSendMethod(const std::string& method) {
+  if (method == "authorization") {
+    return logevent::kSystemBoot;
+  }
+  return logevent::kControlSend;
+}
+
+std::string_view EventForControlAckMethod(const std::string& method) {
+  if (method == "authorization" ||
+      method == "authorization_notify" ||
+      method == "system/authorization_notify") {
+    return logevent::kSystemBoot;
+  }
+  if (method == "analysis_result_notify" ||
+      method == "analysis/analysis_result_notify" ||
+      method == "calibration_result_notify" ||
+      method == "analysis/calibration_result_notify") {
+    return logevent::kControlNotify;
+  }
+  return logevent::kControlAck;
+}
 
 constexpr char kMethodAuthorization[] = "authorization";
 constexpr char kMethodAuthorizationNotify[] = "authorization_notify";
@@ -74,6 +105,9 @@ struct RequestContext {
   int code = -1;
   std::string message;
   std::string method;
+  std::string session_id;
+  std::uint64_t turn_id = 0;
+  std::string request_id;
 };
 
 struct OutgoingMessage {
@@ -86,8 +120,17 @@ struct ActiveTask {
   std::string method;
   std::string uuid;
   std::chrono::steady_clock::time_point start_time;
-  std::chrono::steady_clock::time_point eta_time;
 };
+
+LogContext MakeLogCtx(const std::shared_ptr<RequestContext>& request_context) {
+  LogContext ctx = MakeLogCtx();
+  if (request_context != nullptr) {
+    ctx.session = request_context->session_id;
+    ctx.turn = request_context->turn_id;
+    ctx.req = request_context->request_id;
+  }
+  return ctx;
+}
 
 int ExtractCode(const Json& j) {
   if (j.contains("result") && j.at("result").is_object()) {
@@ -163,13 +206,12 @@ Json ParseParameterOrDefault(const std::string& raw, const Json& fallback) {
   return fallback;
 }
 
-std::string DurationHintText(const std::string& method, const ControlConfig& config) {
+std::string DurationHintText(const std::string& method) {
   if (IsStartCalibrationMethod(method)) {
-    return "好的，已开始校准，预计耗时15分钟。";
+    return "好的，校准已开始。请稍候...";
   }
   if (IsStartAnalysisMethod(method)) {
-    const int minutes = std::max(1, config.analysis_duration_sec / 60);
-    return "好的，已开始分析，预计耗时" + std::to_string(minutes) + "分钟。";
+    return "好的，分析已开始。请稍候...";
   }
   if (IsStopAnalysisMethod(method)) {
     return "好的，已发送停止分析指令。";
@@ -213,10 +255,11 @@ class SimpleControlEngine final : public ControlEngine {
     if (config_.enabled && !connecting_ && !connected_) {
       connecting_ = true;
       boost::asio::post(io_, [this]() { DoConnect(); });
-      GetLogger()->info("control pre-connect scheduled: ws://{}:{}{}",
-                        config_.host,
-                        config_.port,
-                        config_.path);
+      LogInfo(logevent::kSystemBoot, MakeLogCtx(),
+              {Kv("detail", "pre_connect_scheduled"),
+               Kv("host", config_.host),
+               Kv("port", config_.port),
+               Kv("path", BasenamePath(config_.path))});
     }
     return Status::Ok();
   }
@@ -231,6 +274,8 @@ class SimpleControlEngine final : public ControlEngine {
     result->action.clear();
     result->ws_payload_json.clear();
     result->reply_text.clear();
+    result->request_id.clear();
+    result->task_id.clear();
 
     if (!initialized_) {
       return Status::Internal("control engine is not initialized");
@@ -256,6 +301,9 @@ class SimpleControlEngine final : public ControlEngine {
       payload = BuildPayload(selected_method);
       context = std::make_shared<RequestContext>();
       context->method = selected_method;
+      context->session_id = request.session_id;
+      context->turn_id = request.turn_id;
+      context->request_id = result->request_id;
 
       {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -274,11 +322,8 @@ class SimpleControlEngine final : public ControlEngine {
       const bool unknown_method = (context->code == -32600) || context->message == "Unknown";
       const std::optional<std::string> fallback = AlternativeMethodOnUnknown(selected_method);
       if (unknown_method && fallback.has_value()) {
-        GetLogger()->warn("WS method {} rejected (code={}, msg={}), retry with {}",
-                          selected_method,
-                          context->code,
-                          context->message,
-                          fallback.value());
+        LogWarn(logevent::kControlRetry, MakeLogCtx(context),
+                {Kv("method", selected_method), Kv("retry_method", fallback.value())});
         selected_method = fallback.value();
         continue;
       }
@@ -290,13 +335,10 @@ class SimpleControlEngine final : public ControlEngine {
     result->handled = true;
     result->action = selected_method;
     result->ws_payload_json = payload.dump();
-    result->reply_text = DurationHintText(selected_method, config_);
+    result->reply_text = DurationHintText(selected_method);
 
     if (IsStartCalibrationMethod(selected_method) || IsStartAnalysisMethod(selected_method)) {
       const auto now = std::chrono::steady_clock::now();
-      const int duration_sec =
-          IsStartCalibrationMethod(selected_method) ? config_.calibration_duration_sec
-                                                    : config_.analysis_duration_sec;
       std::string analysis_uuid;
       {
         std::lock_guard<std::mutex> lock(last_response_mutex_);
@@ -308,13 +350,15 @@ class SimpleControlEngine final : public ControlEngine {
         }
       }
       if (!analysis_uuid.empty()) {
+        context->request_id = analysis_uuid;
         std::lock_guard<std::mutex> lock(mutex_);
         active_tasks_[analysis_uuid] = ActiveTask{
             selected_method,
             analysis_uuid,
             now,
-            now + std::chrono::seconds(std::max(1, duration_sec)),
         };
+        result->request_id = analysis_uuid;
+        result->task_id = analysis_uuid;
       }
     }
 
@@ -329,6 +373,8 @@ class SimpleControlEngine final : public ControlEngine {
     result->action.clear();
     result->ws_payload_json.clear();
     result->reply_text.clear();
+    result->request_id.clear();
+    result->task_id.clear();
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (notifications_.empty()) {
@@ -517,10 +563,8 @@ class SimpleControlEngine final : public ControlEngine {
         outgoing_queue_.push_back(
             OutgoingMessage{kMethodAuthorization, BuildPayload(kMethodAuthorization).dump(), auth_context});
       }
-      GetLogger()->info("control websocket connected: ws://{}:{}{}",
-                        config_.host,
-                        config_.port,
-                        config_.path);
+      LogInfo(logevent::kSystemBoot, MakeLogCtx(),
+              {Kv("detail", "websocket_connected"), Kv("host", config_.host), Kv("port", config_.port)});
       state_cv_.notify_all();
       DoReadLoop();
       PostWriteLoop();
@@ -537,11 +581,8 @@ class SimpleControlEngine final : public ControlEngine {
       auth_context_.reset();
       last_error_ = "websocket connect failed: " + error;
     }
-    GetLogger()->warn("control websocket connect failed: ws://{}:{}{} error={}",
-                      config_.host,
-                      config_.port,
-                      config_.path,
-                      error);
+    LogWarn(logevent::kControlTransportDisconnect, MakeLogCtx(),
+            {Kv("detail", "websocket_connect_failed"), Kv("err", error)});
     state_cv_.notify_all();
   }
 
@@ -566,9 +607,11 @@ class SimpleControlEngine final : public ControlEngine {
       outgoing_queue_.pop_front();
       write_inflight_ = true;
     }
-    GetLogger()->info("WS send method={}", message.method);
+    LogInfo(EventForControlSendMethod(message.method), MakeLogCtx(message.context),
+            {Kv("method", message.method)});
     if (IsStartCalibrationMethod(message.method)) {
-      GetLogger()->info("WS send payload={}", message.payload);
+      LogDebug(EventForControlSendMethod(message.method), MakeLogCtx(message.context),
+               {Kv("payload", TruncatePayload(message.payload, 128))});
     }
 
     ws_->async_write(
@@ -611,21 +654,23 @@ class SimpleControlEngine final : public ControlEngine {
     try {
       j = Json::parse(text);
     } catch (const std::exception& e) {
-      GetLogger()->warn("control received invalid json: {}", e.what());
+      LogWarn(logevent::kControlTransportDisconnect, MakeLogCtx(),
+              {Kv("detail", "invalid_json"), Kv("err", e.what())});
       return;
     }
 
     const std::string method = j.value("method", "");
     const int code = ExtractCode(j);
     const std::string message = ExtractMessage(j);
-    if (!method.empty()) {
-      GetLogger()->info("WS recv method={} code={} message={}", method, code, message);
-    }
 
     std::shared_ptr<RequestContext> pending;
+    std::shared_ptr<RequestContext> log_context;
     bool completed_pending = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (pending_response_ != nullptr) {
+        log_context = pending_response_;
+      }
       if (pending_response_ != nullptr) {
         if (!method.empty() && method == pending_response_->method) {
           pending = pending_response_;
@@ -650,6 +695,25 @@ class SimpleControlEngine final : public ControlEngine {
           code == 0) {
         authorized_ = true;
         auth_context_.reset();
+      }
+    }
+
+    if (!method.empty()) {
+      const auto ctx_for_log = (pending != nullptr) ? pending : log_context;
+      const std::string_view event = EventForControlAckMethod(method);
+      const bool has_turn_ctx = (ctx_for_log != nullptr &&
+                                 !ctx_for_log->session_id.empty() &&
+                                 ctx_for_log->turn_id > 0U);
+      if (ResolveEventScope(event) == EventScope::kSystem || has_turn_ctx) {
+        LogInfo(event, MakeLogCtx(ctx_for_log),
+                {Kv("method", method), Kv("code", code), Kv("message", MaskSummary(message, 24))});
+      } else {
+        LogInfo(logevent::kSystemBoot, MakeLogCtx(),
+                {Kv("detail", "inbound_message_without_context"),
+                 Kv("event", std::string(event)),
+                 Kv("method", method),
+                 Kv("code", code),
+                 Kv("message", MaskSummary(message, 24))});
       }
     }
 
@@ -705,6 +769,8 @@ class SimpleControlEngine final : public ControlEngine {
     result.action = method;
     result.reply_text = CompletionTextForNotify(method, code, message);
     result.ws_payload_json = j.dump();
+    result.request_id = analysis_uuid;
+    result.task_id = analysis_uuid;
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (!analysis_uuid.empty()) {
@@ -740,7 +806,8 @@ class SimpleControlEngine final : public ControlEngine {
       CompleteRequest(pending, false, -1, message, nullptr);
     }
 
-    GetLogger()->warn("{}", message);
+    LogWarn(logevent::kControlTransportDisconnect, MakeLogCtx(),
+            {Kv("detail", "socket_error"), Kv("err", message)});
   }
 
   void Shutdown() {

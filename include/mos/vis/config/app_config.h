@@ -76,8 +76,6 @@ struct ControlConfig {
   std::string start_analysis_parameter_json;
 
   int authorization_timeout_sec = 60;
-  int calibration_duration_sec = 900;
-  int analysis_duration_sec = 900;
 };
 
 struct WakeAckRule {

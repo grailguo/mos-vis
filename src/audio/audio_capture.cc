@@ -27,6 +27,12 @@ constexpr double kSwitchRmsDeltaThreshold = 2e-3;
 constexpr double kSwitchMinCandidateRms = 2e-3;
 constexpr std::uint64_t kEnergyLogIntervalCallbacks = 50;
 
+LogContext AudioLogCtx() {
+  LogContext ctx;
+  ctx.module = "AudioCapture";
+  return ctx;
+}
+
 std::string ToLowerCopy(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
     return static_cast<char>(std::tolower(c));
@@ -108,13 +114,13 @@ class ScopedStderrSilencer {
 };
 
 void PrintSelectedDevice(const char* tag, const AudioDeviceInfo& device) {
-  GetLogger()->info("{}: [{}] {} | in={} | out={} | default_sr={}",
-                    tag,
-                    device.index,
-                    device.name,
-                    device.max_input_channels,
-                    device.max_output_channels,
-                    device.default_sample_rate);
+  LogInfo(logevent::kAudioDeviceOpen, AudioLogCtx(),
+          {Kv("tag", tag),
+           Kv("index", device.index),
+           Kv("name", device.name),
+           Kv("in", device.max_input_channels),
+           Kv("out", device.max_output_channels),
+           Kv("default_sr", device.default_sample_rate)});
 }
 
 int ClampInputChannels(int device_channels) {
@@ -206,9 +212,9 @@ int AudioCapture::ResolveInputDeviceIndex() const {
     if (matched.has_value()) {
       return matched->index;
     }
-    GetLogger()->warn(
-        "input device '{}' not found by partial match. Falling back to default input device.",
-        config_.input_device);
+    LogWarn(logevent::kAudioDeviceOpen, AudioLogCtx(),
+            {Kv("detail", "input_device_not_found_fallback_default"),
+             Kv("input_device", config_.input_device)});
   }
 
   return Pa_GetDefaultInputDevice();
@@ -269,19 +275,13 @@ Status AudioCapture::OpenInputStream() {
     return Status::Internal(std::string("Pa_OpenStream failed: ") + Pa_GetErrorText(open_err));
   }
 
-  GetLogger()->info(
-      "Opened input stream on device: [{}] {} | sample_rate={} | requested_output_channels={} "
-      "| device_input_channels={} | frames_per_buffer={} | channel_select_mode={} "
-      "| fixed_channel_index={} | track_switch_consecutive={}",
-      input_device_index,
-      input_info->name,
-      config_.sample_rate,
-      config_.channels,
-      opened_device_input_channels_,
-      config_.capture_chunk_samples,
-      ChannelSelectModeName(callback_context_.channel_select_mode),
-      callback_context_.fixed_channel_index,
-      callback_context_.track_switch_consecutive);
+  LogInfo(logevent::kAudioDeviceOpen, AudioLogCtx(),
+          {Kv("index", input_device_index),
+           Kv("name", input_info->name),
+           Kv("sr", config_.sample_rate),
+           Kv("ch", opened_device_input_channels_),
+           Kv("buf", config_.capture_chunk_samples),
+           Kv("mode", ChannelSelectModeName(callback_context_.channel_select_mode))});
 
   return Status::Ok();
 }
@@ -467,7 +467,7 @@ Status AudioCapture::Start() {
     return Status::Internal(std::string("Pa_StartStream failed: ") + Pa_GetErrorText(start_err));
   }
 
-  GetLogger()->info("AudioCapture started");
+  LogInfo(logevent::kSystemBoot, AudioLogCtx(), {Kv("detail", "audio_capture_started")});
   return Status::Ok();
 }
 
@@ -497,7 +497,7 @@ void AudioCapture::Stop() {
     pa_initialized_ = false;
   }
 
-  GetLogger()->info("AudioCapture stopped");
+  LogInfo(logevent::kSystemBoot, AudioLogCtx(), {Kv("detail", "audio_capture_stopped")});
 }
 
 }  // namespace mos::vis

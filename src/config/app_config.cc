@@ -139,10 +139,6 @@ Status AppConfig::LoadFromFile(const std::string& path, AppConfig* config) {
       config->control.version = c.value("version", config->control.version);
       config->control.authorization_timeout_sec =
           c.value("authorization_timeout_sec", config->control.authorization_timeout_sec);
-      config->control.calibration_duration_sec =
-          c.value("calibration_duration_sec", config->control.calibration_duration_sec);
-      config->control.analysis_duration_sec =
-          c.value("analysis_duration_sec", config->control.analysis_duration_sec);
 
       if (c.contains("start_calibration_parameter")) {
         config->control.start_calibration_parameter_json =

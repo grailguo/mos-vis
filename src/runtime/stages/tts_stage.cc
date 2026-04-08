@@ -1,12 +1,23 @@
 #include "mos/vis/runtime/stages/tts_stage.h"
 
 #include "mos/vis/common/logging.h"
+#include "mos/vis/runtime/subsm/hotspot_subsms.h"
 
 namespace mos::vis {
 
 namespace {
 
 constexpr const char* kLogTag = "TtsStage";
+
+LogContext MakeLogCtx(const SessionContext& context) {
+  LogContext ctx;
+  ctx.module = kLogTag;
+  ctx.session = context.session_id;
+  ctx.turn = context.turn_id;
+  ctx.state = std::to_string(static_cast<int>(context.state));
+  ctx.req = context.current_control_request_id;
+  return ctx;
+}
 
 }  // namespace
 
@@ -29,6 +40,8 @@ bool TtsStage::CanProcess(SessionState state) const {
 }
 
 Status TtsStage::Process(SessionContext& context) {
+  ConsumeReplyEvents(context);
+
   if (!context.config.tts.enabled || context.tts == nullptr) {
     return Status::Ok();
   }
@@ -39,45 +52,99 @@ Status TtsStage::Process(SessionContext& context) {
   }
 
   // Take the next task
+  const ScopedTimer timer;
   const TtsTask task = tts_state.tasks.front();
   tts_state.tasks.pop_front();
   tts_state.task_running = true;
+  context.reply_tts_started = true;
+  ++context.reply_playback_token;
   context.state = SessionState::kSpeaking;
 
   Status st = StartTask(context, task);
   if (!st.ok()) {
-    GetLogger()->warn("{}: TTS task failed: {}", kLogTag, st.message());
+    LogWarn(logevent::kTtsFail, MakeLogCtx(context), {Kv("err", st.message())});
+    context.local_events.reply_events.push_back(subsm::ReplyEvent::kTtsPlaybackFailed);
+  } else {
+    LogInfo(logevent::kTtsDone, MakeLogCtx(context), {Kv("cost_ms", timer.ElapsedMs())});
+    context.local_events.reply_events.push_back(subsm::ReplyEvent::kTtsPlaybackCompleted);
   }
 
   tts_state.wake_ack_pending = false;
   tts_state.task_running = false;
-
-  // Determine next state
-  if (context.nlu_control_state.has_pending_nlu_result) {
-    // This case seems to be a fallback in the original code
-    context.nlu_control_state.has_pending_nlu_result = false;
-    context.nlu_control_state.pending_nlu_result.reset();
-    context.nlu_control_state.pending_control_text.clear();
-    context.state = SessionState::kIdle;
-    GetLogger()->info("{}: wait for awake", kLogTag);
-  } else {
-    context.state = SessionState::kPreListening;
-    GetLogger()->info("{}: wait for instruction", kLogTag);
-  }
+  ConsumeReplyEvents(context);
 
   return Status::Ok();
 }
 
 Status TtsStage::StartTask(SessionContext& context, const TtsTask& task) {
   if (!task.preset_file.empty()) {
-    GetLogger()->debug("{}: playing preset file: {}", kLogTag, task.preset_file);
+    LogDebug(logevent::kTtsStart, MakeLogCtx(context), {Kv("preset", BasenamePath(task.preset_file))});
     return context.tts->PlayFile(task.preset_file);
   } else if (!task.reply_text.empty()) {
-    GetLogger()->debug("{}: speaking text: {}", kLogTag, task.reply_text);
+    LogDebug(logevent::kTtsStart, MakeLogCtx(context), {Kv("text", MaskSummary(task.reply_text, 16))});
     return context.tts->Speak(task.reply_text);
   }
   // Empty task – nothing to do
   return Status::Ok();
+}
+
+void TtsStage::ConsumeReplyEvents(SessionContext& context) {
+  auto& events = context.local_events.reply_events;
+  while (!events.empty()) {
+    const subsm::ReplyEvent event = events.front();
+    events.pop_front();
+
+    const subsm::ReplyDecision decision =
+        subsm::StepReply(context.subsm_state.reply,
+                         event,
+                         context.keep_session_open,
+                         context.barge_in_enabled);
+
+    LogDebug(logevent::kSubsmTransition, MakeLogCtx(context),
+             {Kv("subsm", "reply"),
+              Kv("from", static_cast<int>(context.subsm_state.reply)),
+              Kv("ev", static_cast<int>(event)),
+              Kv("guard", context.keep_session_open ? "keep_open" : "close_session"),
+              Kv("to", static_cast<int>(decision.next_state)),
+              Kv("action", static_cast<int>(decision.action))});
+
+    context.subsm_state.reply = decision.next_state;
+
+    switch (decision.action) {
+      case subsm::ReplyAction::kRearmCommandWait:
+        context.state = SessionState::kPreListening;
+        context.reply_tts_started = false;
+        ++context.turn_id;
+        LogInfo(logevent::kStateTransition, MakeLogCtx(context),
+                {Kv("layer", "main"),
+                 Kv("from", "speaking"),
+                 Kv("to", "pre_listening"),
+                 Kv("reason", "tts_done_keep_session")});
+        break;
+      case subsm::ReplyAction::kEndSessionToIdle:
+        context.state = SessionState::kIdle;
+        context.reply_tts_started = false;
+        LogInfo(logevent::kSessionEnd, MakeLogCtx(context),
+                {Kv("reason", "tts_done_close_session")});
+        break;
+      case subsm::ReplyAction::kStartAsrByBargeIn:
+        // Current TTS engine has no hard-stop API; switch to listening path and clear queued reply.
+        context.tts_state.tasks.clear();
+        context.state = SessionState::kListening;
+        context.reply_tts_started = false;
+        if (context.asr != nullptr && context.config.asr.enabled) {
+          Status st = context.asr->Reset();
+          if (!st.ok()) {
+            GetLogger()->warn("{}: ASR reset failed on barge-in: {}", kLogTag, st.message());
+          }
+        }
+        LogWarn(logevent::kTtsBargeIn, MakeLogCtx(context), {Kv("detail", "switch_to_listening")});
+        break;
+      case subsm::ReplyAction::kNoop:
+      default:
+        break;
+    }
+  }
 }
 
 }  // namespace mos::vis

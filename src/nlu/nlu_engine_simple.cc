@@ -176,7 +176,8 @@ class SimpleNluEngine final : public NluEngine {
 
     if (config_.enabled == false) {
       initialized_ = true;
-      GetLogger()->info("NLU initialized in disabled mode");
+      LogInfo(logevent::kSystemBoot, LogContext{"NluEngine", "", 0, "", ""},
+              {Kv("detail", "nlu_initialized_disabled")});
       return Status::Ok();
     }
 
@@ -186,17 +187,17 @@ class SimpleNluEngine final : public NluEngine {
       if (!st.ok()) {
         return st;
       }
-      GetLogger()->info(
-          "NLU initialized with rules file: {} (provider={}, threads={})",
-          loaded_path,
-          config_.provider,
-          config_.num_threads);
+      LogInfo(logevent::kSystemBoot, LogContext{"NluEngine", "", 0, "", ""},
+              {Kv("detail", "nlu_initialized_rules_file"),
+               Kv("rules_file", BasenamePath(loaded_path)),
+               Kv("provider", config_.provider),
+               Kv("threads", config_.num_threads)});
     } else {
       rules_ = BuiltinRules();
-      GetLogger()->info(
-          "NLU initialized with built-in rules (provider={}, threads={})",
-          config_.provider,
-          config_.num_threads);
+      LogInfo(logevent::kSystemBoot, LogContext{"NluEngine", "", 0, "", ""},
+              {Kv("detail", "nlu_initialized_builtin"),
+               Kv("provider", config_.provider),
+               Kv("threads", config_.num_threads)});
     }
 
     initialized_ = true;

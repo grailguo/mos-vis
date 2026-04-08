@@ -65,12 +65,15 @@ class RknnVadEngine final : public VadEngine {
     attr.index = 0;
     rknn_query(ctx_, RKNN_QUERY_INPUT_ATTR, &attr, sizeof(attr));
 
-    GetLogger()->info("VAD input attr: type={} qnt_type={} scale={} zp={}",
-                      attr.type,
-                      attr.qnt_type,
-                      attr.scale,
-                      attr.zp);
-    GetLogger()->info("VAD initialized with RKNN model: {}", config.model_path);
+    LogInfo(logevent::kSystemBoot, LogContext{"VadEngine", "", 0, "", ""},
+            {Kv("detail", "vad_input_attr"),
+             Kv("type", attr.type),
+             Kv("qnt_type", attr.qnt_type),
+             Kv("scale", attr.scale),
+             Kv("zp", attr.zp)});
+    LogInfo(logevent::kSystemBoot, LogContext{"VadEngine", "", 0, "", ""},
+            {Kv("detail", "vad_initialized"),
+             Kv("model", BasenamePath(config.model_path))});
     return Status::Ok();
   }
 

@@ -112,11 +112,12 @@ class SherpaAsrEngine final : public AsrEngine {
 
     last_text_.clear();
     last_json_.clear();
-    GetLogger()->info("ASR initialized: provider={} encoder={} decoder={} joiner={}",
-                      cfg.model_config.provider,
-                      encoder_path_,
-                      decoder_path_,
-                      joiner_path_);
+    LogInfo(logevent::kSystemBoot, LogContext{"AsrEngine", "", 0, "", ""},
+            {Kv("detail", "asr_initialized"),
+             Kv("provider", cfg.model_config.provider),
+             Kv("encoder", BasenamePath(encoder_path_)),
+             Kv("decoder", BasenamePath(decoder_path_)),
+             Kv("joiner", BasenamePath(joiner_path_))});
     return Status::Ok();
   }
 

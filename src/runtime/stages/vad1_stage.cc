@@ -15,13 +15,13 @@ constexpr const char* kLogTag = "Vad1Stage";
 float Clamp01(float v) { return std::max(0.0F, std::min(1.0F, v)); }
 
 // Helper to convert Vad1MachineStage to string
-const char* Vad1MachineStageName(Vad1MachineStage stage) {
+const char* Vad1MachineStageName(SessionContext::Vad1MachineStage stage) {
   switch (stage) {
-    case Vad1MachineStage::kClosed:
+    case SessionContext::Vad1MachineStage::kClosed:
       return "closed";
-    case Vad1MachineStage::kOpen:
+    case SessionContext::Vad1MachineStage::kOpen:
       return "open";
-    case Vad1MachineStage::kHangover:
+    case SessionContext::Vad1MachineStage::kHangover:
       return "hangover";
   }
   return "closed";
@@ -97,9 +97,9 @@ Status Vad1Stage::OnAttach(SessionContext& context) {
       context.vad1_state.hangover_frames,
       context.vad1_state.min_open_frames,
       context.vad1_state.min_closed_frames,
-      context.vad1_state.hangover_reopen_frames_,
-      context.vad1_state.instant_open_frames_,
-      context.vad1_state.reopen_cooldown_frames_,
+      context.vad1_state.hangover_reopen_frames,
+      context.vad1_state.instant_open_frames,
+      context.vad1_state.reopen_cooldown_frames,
       context.vad1_state.open_threshold,
       context.vad1_state.close_threshold,
       context.vad1_state.instant_open_threshold);
@@ -180,9 +180,9 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
   const bool above_open = state.prob_ema >= state.open_threshold;
   const bool below_close = state.prob_ema < state.close_threshold;
 
-  const Vad1MachineStage prev_stage = state.stage;
+  const SessionContext::Vad1MachineStage prev_stage = state.stage;
   switch (state.stage) {
-    case Vad1MachineStage::kClosed: {
+    case SessionContext::Vad1MachineStage::kClosed: {
       if (instant_open) {
         ++state.instant_open_count;
       } else {
@@ -198,7 +198,7 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
       if (can_open_now &&
           (state.instant_open_count >= state.instant_open_frames ||
            state.open_count >= std::max(1, context.config.vad1.open_frames))) {
-        state.stage = Vad1MachineStage::kOpen;
+        state.stage = SessionContext::Vad1MachineStage::kOpen;
         state.stage_age_frames = 0;
         state.open_count = 0;
         state.close_count = 0;
@@ -208,7 +208,7 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
       }
       break;
     }
-    case Vad1MachineStage::kOpen: {
+    case SessionContext::Vad1MachineStage::kOpen: {
       if (below_close) {
         ++state.close_count;
       } else {
@@ -216,7 +216,7 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
       }
       const bool can_leave_open = state.stage_age_frames >= state.min_open_frames;
       if (can_leave_open && state.close_count >= std::max(1, context.config.vad1.close_frames)) {
-        state.stage = Vad1MachineStage::kHangover;
+        state.stage = SessionContext::Vad1MachineStage::kHangover;
         state.stage_age_frames = 0;
         state.hangover_left = state.hangover_frames;
         state.close_count = 0;
@@ -225,7 +225,7 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
       }
       break;
     }
-    case Vad1MachineStage::kHangover: {
+    case SessionContext::Vad1MachineStage::kHangover: {
       if (above_open) {
         ++state.hangover_reopen_count;
       } else {
@@ -234,7 +234,7 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
 
       if ((instant_open && state.hangover_reopen_count >= 1) ||
           (state.hangover_reopen_count >= state.hangover_reopen_frames)) {
-        state.stage = Vad1MachineStage::kOpen;
+        state.stage = SessionContext::Vad1MachineStage::kOpen;
         state.stage_age_frames = 0;
         state.hangover_left = 0;
         state.open_count = 0;
@@ -242,7 +242,7 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
       } else {
         --state.hangover_left;
         if (state.hangover_left <= 0) {
-          state.stage = Vad1MachineStage::kClosed;
+          state.stage = SessionContext::Vad1MachineStage::kClosed;
           state.stage_age_frames = 0;
           state.hangover_left = 0;
           state.open_count = 0;
@@ -255,7 +255,7 @@ bool Vad1Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
     }
   }
 
-  state.kws_gate_open = (state.stage != Vad1MachineStage::kClosed);
+  state.kws_gate_open = (state.stage != SessionContext::Vad1MachineStage::kClosed);
   if (state.stage != prev_stage) {
     GetLogger()->debug("{}: gate transition: {} -> {} | prob={:.4f} ema={:.4f} gate={}",
                        kLogTag,

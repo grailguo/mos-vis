@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "mos/vis/common/logging.h"
+#include "mos/vis/runtime/subsm/hotspot_subsms.h"
 
 namespace mos::vis {
 
@@ -12,14 +13,24 @@ namespace {
 
 constexpr const char* kLogTag = "Vad2Stage";
 
+LogContext MakeLogCtx(const SessionContext& context) {
+  LogContext ctx;
+  ctx.module = kLogTag;
+  ctx.session = context.session_id;
+  ctx.turn = context.turn_id;
+  ctx.state = std::to_string(static_cast<int>(context.state));
+  ctx.req = context.current_control_request_id;
+  return ctx;
+}
+
 float Clamp01(float v) { return std::max(0.0F, std::min(1.0F, v)); }
 
 // Helper to convert Vad2MachineStage to string
-const char* Vad2MachineStageName(Vad2MachineStage stage) {
+const char* Vad2MachineStageName(SessionContext::Vad2MachineStage stage) {
   switch (stage) {
-    case Vad2MachineStage::kSilence:
+    case SessionContext::Vad2MachineStage::kSilence:
       return "silence";
-    case Vad2MachineStage::kSpeech:
+    case SessionContext::Vad2MachineStage::kSpeech:
       return "speech";
   }
   return "silence";
@@ -57,7 +68,7 @@ Status Vad2Stage::OnAttach(SessionContext& context) {
   context.vad2_state.end_threshold = Clamp01(std::max(0.01F, vad_config.threshold * 0.5F));
 
   // Reset state variables
-  context.vad2_state.stage = Vad2MachineStage::kSilence;
+  context.vad2_state.stage = SessionContext::Vad2MachineStage::kSilence;
   context.vad2_state.start_count = 0;
   context.vad2_state.end_count = 0;
   context.vad2_state.hangover_left = 0;
@@ -71,10 +82,12 @@ Status Vad2Stage::OnAttach(SessionContext& context) {
       std::max<std::size_t>(1, capture_chunk_samples_ / vad_hop_samples_);
   max_vad_windows_per_tick_ = nominal_windows_per_tick * 4;
 
-  GetLogger()->info(
-      "{}: Initialized: hangover_ms={} hangover_frames={} start_th={:.3f} end_th={:.3f}",
-      kLogTag, vad_config.hangover_ms, context.vad2_state.hangover_frames,
-      context.vad2_state.start_threshold, context.vad2_state.end_threshold);
+  LogInfo(logevent::kSystemBoot, MakeLogCtx(context),
+          {Kv("detail", "vad2_init"),
+           Kv("hangover_ms", vad_config.hangover_ms),
+           Kv("hangover_frames", context.vad2_state.hangover_frames),
+           Kv("start_th", context.vad2_state.start_threshold),
+           Kv("end_th", context.vad2_state.end_threshold)});
 
   return Status::Ok();
 }
@@ -105,7 +118,8 @@ Status Vad2Stage::Process(SessionContext& context) {
                                       vad_window_buffer_.size(),
                                       &vad_result);
     if (!st.ok()) {
-      GetLogger()->error("{}: VAD-2 process failed: {}", kLogTag, st.message());
+      LogError(logevent::kAudioSilenceTooLong, MakeLogCtx(context),
+               {Kv("detail", "vad2_process_failed"), Kv("err", st.message())});
       break;
     }
     (void)UpdateStateMachine(context, vad_result.probability);
@@ -119,16 +133,16 @@ bool Vad2Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
   auto& state = context.vad2_state;
   const float prob = Clamp01(vad_probability);
   state.prob_ema = (state.ema_alpha * prob) + ((1.0F - state.ema_alpha) * state.prob_ema);
-  const Vad2MachineStage prev_stage = state.stage;
+  const SessionContext::Vad2MachineStage prev_stage = state.stage;
 
-  if (state.stage == Vad2MachineStage::kSilence) {
+  if (state.stage == SessionContext::Vad2MachineStage::kSilence) {
     if (state.prob_ema >= state.start_threshold) {
       ++state.start_count;
     } else {
       state.start_count = 0;
     }
     if (state.start_count >= std::max(1, context.config.vad2.start_frames)) {
-      state.stage = Vad2MachineStage::kSpeech;
+      state.stage = SessionContext::Vad2MachineStage::kSpeech;
       state.start_count = 0;
       state.end_count = 0;
       state.hangover_left = 0;
@@ -147,23 +161,30 @@ bool Vad2Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
         --state.hangover_left;
       }
       if (state.hangover_left <= 0) {
-        state.stage = Vad2MachineStage::kSilence;
+        state.stage = SessionContext::Vad2MachineStage::kSilence;
         state.end_count = 0;
       }
     }
   }
 
   if (prev_stage != state.stage) {
-    if (state.stage == Vad2MachineStage::kSpeech) {
+    if (state.stage == SessionContext::Vad2MachineStage::kSpeech) {
       OnSpeechStart(context);
     } else {
       OnSpeechEnd(context);
     }
   }
-  return state.stage == Vad2MachineStage::kSpeech;
+  return state.stage == SessionContext::Vad2MachineStage::kSpeech;
 }
 
 void Vad2Stage::OnSpeechStart(SessionContext& context) {
+  if (context.state == SessionState::kSpeaking) {
+    context.local_events.reply_events.push_back(subsm::ReplyEvent::kUserBargeIn);
+    LogWarn(logevent::kTtsBargeIn, MakeLogCtx(context),
+            {Kv("detail", "speech_start_while_speaking")});
+    return;
+  }
+
   // Only trigger speech start if we are in a state that expects speech
   if (context.state == SessionState::kPreListening ||
       context.state == SessionState::kWakeCandidate) {

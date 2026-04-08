@@ -1,16 +1,29 @@
 #include "mos/vis/runtime/stages/kws_stage.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <sstream>
 
 #include "mos/vis/common/logging.h"
+#include "mos/vis/runtime/subsm/hotspot_subsms.h"
 
 namespace mos::vis {
 
 namespace {
 
 constexpr const char* kLogTag = "KwsStage";
+
+LogContext MakeLogCtx(const SessionContext& context) {
+  LogContext ctx;
+  ctx.module = kLogTag;
+  ctx.session = context.session_id;
+  ctx.turn = context.turn_id;
+  ctx.state = std::to_string(static_cast<int>(context.state));
+  ctx.req = context.current_control_request_id;
+  return ctx;
+}
 
 // Helper to compute chunk statistics (RMS and peak)
 struct ChunkStats {
@@ -85,9 +98,9 @@ Status KwsStage::OnAttach(SessionContext& context) {
 
   // Initialize KWS state in context (ensure fields are set)
   auto& kws_state = context.kws_state;
-  kws_state.preroll_capacity_samples_ = static_cast<std::size_t>(
+  kws_state.preroll_capacity_samples = static_cast<std::size_t>(
       std::max(0, kws_config.preroll_ms) * std::max(1, audio_config.sample_rate) / 1000);
-  kws_state.pending_max_age_chunks_ =
+  kws_state.pending_max_age_chunks =
       std::max(1, (std::max(200, kws_config.preroll_ms) / 20));  // Tick is 20ms.
 
   // Clear any existing state
@@ -102,14 +115,16 @@ Status KwsStage::OnAttach(SessionContext& context) {
   kws_state.last_wake_keyword.clear();
   kws_state.last_wake_ack_text.clear();
   kws_state.last_wake_ack_preset_file.clear();
+  context.subsm_state.wake = subsm::WakeState::kWaitingWakeup;
 
   // Pre-allocate buffer
   kws_chunk_buffer_.resize(kws_chunk_samples_, 0.0F);
 
-  GetLogger()->info(
-      "{}: Initialized: chunk_samples={} preroll_ms={} preroll_capacity_samples={}",
-      kLogTag, kws_chunk_samples_, kws_config.preroll_ms,
-      kws_state.preroll_capacity_samples_);
+  LogInfo(logevent::kSystemBoot, MakeLogCtx(context),
+          {Kv("detail", "kws_stage_init"),
+           Kv("chunk_samples", kws_chunk_samples_),
+           Kv("preroll_ms", kws_config.preroll_ms),
+           Kv("preroll_capacity_samples", kws_state.preroll_capacity_samples)});
 
   return Status::Ok();
 }
@@ -139,7 +154,8 @@ Status KwsStage::Process(SessionContext& context) {
   if (gate_just_opened) {
     Status reset_st = context.kws->Reset();
     if (!reset_st.ok()) {
-      GetLogger()->warn("{}: KWS reset failed on gate open: {}", kLogTag, reset_st.message());
+      LogWarn(logevent::kKwsResetFailed, MakeLogCtx(context),
+              {Kv("phase", "gate_open"), Kv("err", reset_st.message())});
     } else {
       GetLogger()->debug("{}: KWS stream reset on gate open", kLogTag);
     }
@@ -160,7 +176,8 @@ Status KwsStage::Process(SessionContext& context) {
   if (gate_just_closed) {
     Status reset_st = context.kws->Reset();
     if (!reset_st.ok()) {
-      GetLogger()->warn("{}: KWS reset failed on gate close: {}", kLogTag, reset_st.message());
+      LogWarn(logevent::kKwsResetFailed, MakeLogCtx(context),
+              {Kv("phase", "gate_close"), Kv("err", reset_st.message())});
     } else {
       GetLogger()->debug("{}: KWS stream reset on gate close", kLogTag);
     }
@@ -186,10 +203,10 @@ Status KwsStage::Process(SessionContext& context) {
     }
 
     // Update preroll buffer
-    if (kws_state.preroll_capacity_samples_ > 0U) {
+    if (kws_state.preroll_capacity_samples > 0U) {
       for (float s : kws_chunk_buffer_) {
         kws_state.preroll_samples.push_back(s);
-        if (kws_state.preroll_samples.size() > kws_state.preroll_capacity_samples_) {
+        if (kws_state.preroll_samples.size() > kws_state.preroll_capacity_samples) {
           kws_state.preroll_samples.pop_front();
         }
       }
@@ -212,7 +229,7 @@ Status KwsStage::Process(SessionContext& context) {
                                      kws_chunk_buffer_.size(),
                                      &kws_result);
     if (!st.ok()) {
-      GetLogger()->error("{}: KWS process failed: {}", kLogTag, st.message());
+      LogError(logevent::kKwsTimeout, MakeLogCtx(context), {Kv("detail", "kws_process_failed"), Kv("err", st.message())});
     } else if (kws_result.detected) {
       GetLogger()->debug("{}: detected keyword='{}' gate={} state={}",
                          kLogTag, kws_result.keyword,
@@ -221,16 +238,11 @@ Status KwsStage::Process(SessionContext& context) {
 
       // Bypass VAD-1 gate: wake immediately on KWS hit while waiting for wakeup.
       if (context.state == SessionState::kIdle) {
-        ++context.stats.kws_hit_count;
-        kws_state.fired_in_current_gate = true;
-        kws_state.pending_hit = false;
-        kws_state.pending_keyword.clear();
-        kws_state.pending_json.clear();
-        kws_state.pending_age_chunks = 0;
-        HandleKwsHit(context, kws_result.keyword, kws_result.json);
+        context.local_events.wake_events.push_back(subsm::WakeEvent::kKwsMatched);
+        ConsumeWakeEvents(context, kws_result.keyword, kws_result.json);
       } else {
-        GetLogger()->debug("{}: KWS hit ignored: state={} (not idle)",
-                           kLogTag, static_cast<int>(context.state));
+        LogDebug(logevent::kKwsReject, MakeLogCtx(context),
+                 {Kv("detail", "hit_ignored_not_idle")});
       }
     }
 
@@ -259,8 +271,19 @@ Status KwsStage::Process(SessionContext& context) {
 void KwsStage::HandleKwsHit(SessionContext& context,
                             const std::string& keyword,
                             const std::string& detail_json) {
+  {
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    std::ostringstream ss;
+    ss << "s" << now_ms;
+    context.session_id = ss.str();
+    context.turn_id = 1;
+  }
+
   // Update session state
   context.state = SessionState::kWakeCandidate;
+  context.last_wake_timestamp = std::chrono::steady_clock::now();
 
   // Store wake keyword and acknowledgment details
   auto& kws_state = context.kws_state;
@@ -274,14 +297,81 @@ void KwsStage::HandleKwsHit(SessionContext& context,
       TtsTask{kws_state.last_wake_ack_preset_file, kws_state.last_wake_ack_text});
   context.tts_state.wake_ack_pending = true;
 
-  GetLogger()->info("{}: wakeup hit: {}", kLogTag, keyword);
+  LogInfo(logevent::kKwsHit, MakeLogCtx(context),
+          {Kv("keyword", keyword), Kv("cooldown", 0)});
   if (!detail_json.empty()) {
     GetLogger()->debug("{}: KWS detail: {}", kLogTag, detail_json);
   }
 
   // Transition to pre‑listening state
   context.state = SessionState::kPreListening;
-  GetLogger()->info("{}: wait for instruction", kLogTag);
+  LogInfo(logevent::kStateTransition, MakeLogCtx(context),
+          {Kv("layer", "main"),
+           Kv("from", "wake_candidate"),
+           Kv("to", "pre_listening"),
+           Kv("reason", "kws_hit")});
+}
+
+void KwsStage::ConsumeWakeEvents(SessionContext& context,
+                                 const std::string& keyword,
+                                 const std::string& detail_json) {
+  auto& events = context.local_events.wake_events;
+  while (!events.empty()) {
+    const subsm::WakeEvent event = events.front();
+    events.pop_front();
+
+    if (event == subsm::WakeEvent::kKwsMatched && context.session_id.empty()) {
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now().time_since_epoch())
+                              .count();
+      std::ostringstream ss;
+      ss << "s" << now_ms;
+      context.session_id = ss.str();
+      context.turn_id = 1;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const bool in_cooldown =
+        context.last_wake_timestamp.time_since_epoch().count() != 0 &&
+        (now - context.last_wake_timestamp) <
+            std::chrono::milliseconds(std::max(0, context.subsm_state.wake_cooldown_ms));
+
+    const subsm::WakeState prev = context.subsm_state.wake;
+    const subsm::WakeDecision decision = subsm::StepWake(prev, event, in_cooldown);
+    context.subsm_state.wake = decision.next_state;
+
+    LogDebug(logevent::kSubsmTransition, MakeLogCtx(context),
+             {Kv("subsm", "wake"),
+              Kv("from", static_cast<int>(prev)),
+              Kv("ev", static_cast<int>(event)),
+              Kv("guard", in_cooldown ? "cooldown" : "not_cooldown"),
+              Kv("to", static_cast<int>(decision.next_state)),
+              Kv("action", static_cast<int>(decision.action))});
+
+    switch (decision.action) {
+      case subsm::WakeAction::kFireWake:
+        ++context.stats.kws_hit_count;
+        context.kws_state.fired_in_current_gate = true;
+        context.kws_state.pending_hit = false;
+        context.kws_state.pending_keyword.clear();
+        context.kws_state.pending_json.clear();
+        context.kws_state.pending_age_chunks = 0;
+        HandleKwsHit(context, keyword, detail_json);
+        break;
+      case subsm::WakeAction::kIgnoreMatched:
+        LogInfo(logevent::kKwsHit, MakeLogCtx(context), {Kv("keyword", keyword), Kv("cooldown", 1)});
+        break;
+      case subsm::WakeAction::kCleanupWindow:
+        context.kws_state.pending_hit = false;
+        context.kws_state.pending_keyword.clear();
+        context.kws_state.pending_json.clear();
+        context.kws_state.pending_age_chunks = 0;
+        break;
+      case subsm::WakeAction::kNoop:
+      default:
+        break;
+    }
+  }
 }
 
 }  // namespace mos::vis

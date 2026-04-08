@@ -44,6 +44,8 @@ class AsrStage : public PipelineStage {
 
   // Finalize ASR and transition to recognizing state
   Status FinalizeAsr(SessionContext& context);
+  void ConsumeAsrEvents(SessionContext& context, const std::string& final_text);
+  void ScheduleRetryReply(SessionContext& context);
 
   // Audio reader for this stage
   std::unique_ptr<AudioReader> reader_;

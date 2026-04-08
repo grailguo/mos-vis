@@ -33,6 +33,7 @@ class TtsStage : public PipelineStage {
  private:
   // Start a TTS task (preset file or synthesis)
   Status StartTask(SessionContext& context, const TtsTask& task);
+  void ConsumeReplyEvents(SessionContext& context);
 };
 
 }  // namespace mos::vis

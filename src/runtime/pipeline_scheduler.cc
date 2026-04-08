@@ -10,6 +10,16 @@ namespace {
 
 constexpr const char* kLogTag = "PipelineScheduler";
 
+LogContext MakeLogCtx(const SessionContext& context) {
+  LogContext ctx;
+  ctx.module = kLogTag;
+  ctx.session = context.session_id;
+  ctx.turn = context.turn_id;
+  ctx.state = std::to_string(static_cast<int>(context.state));
+  ctx.req = context.current_control_request_id;
+  return ctx;
+}
+
 }  // namespace
 
 PipelineScheduler::PipelineScheduler() = default;
@@ -18,25 +28,28 @@ PipelineScheduler::~PipelineScheduler() = default;
 
 Status PipelineScheduler::Initialize(SessionContext& context) {
   if (initialized_) {
-    GetLogger()->warn("{}: Already initialized", kLogTag);
+    LogWarn(logevent::kSystemBoot, MakeLogCtx(context), {Kv("detail", "already_initialized")});
     return Status::Ok();
   }
 
-  GetLogger()->info("{}: Initializing with {} stages", kLogTag, stages_.size());
+  LogInfo(logevent::kSystemBoot, MakeLogCtx(context),
+          {Kv("detail", "pipeline_init"), Kv("stage_count", stages_.size())});
 
   // Call OnAttach for each stage
   for (auto& stage : stages_) {
     Status st = stage->OnAttach(context);
     if (!st.ok()) {
-      GetLogger()->error("{}: Stage '{}' failed to attach: {}", kLogTag,
-                         stage->Name(), st.message());
+      LogError(logevent::kSessionEnd, MakeLogCtx(context),
+               {Kv("event_detail", "stage_attach_failed"),
+                Kv("stage", stage->Name()),
+                Kv("err", st.message())});
       return Status::Internal(
           "Pipeline stage '" + stage->Name() + "' failed to attach: " + st.message());
     }
   }
 
   initialized_ = true;
-  GetLogger()->info("{}: Initialization complete", kLogTag);
+  LogInfo(logevent::kSystemBoot, MakeLogCtx(context), {Kv("detail", "pipeline_init_done")});
   return Status::Ok();
 }
 
@@ -50,8 +63,10 @@ Status PipelineScheduler::Process(SessionContext& context) {
     if (stage->CanProcess(context.state)) {
       Status st = stage->Process(context);
       if (!st.ok()) {
-        GetLogger()->error("{}: Stage '{}' failed: {}", kLogTag,
-                           stage->Name(), st.message());
+        LogError(logevent::kSessionEnd, MakeLogCtx(context),
+                 {Kv("event_detail", "stage_process_failed"),
+                  Kv("stage", stage->Name()),
+                  Kv("err", st.message())});
         // Continue processing other stages even if one fails
         // The stage should handle its own error recovery
       }
@@ -63,16 +78,18 @@ Status PipelineScheduler::Process(SessionContext& context) {
 
 void PipelineScheduler::AddStage(std::unique_ptr<PipelineStage> stage) {
   if (!stage) {
-    GetLogger()->warn("{}: Attempted to add null stage", kLogTag);
+    LogWarn(logevent::kSystemBoot, LogContext{std::string(kLogTag), "", 0, "", ""},
+            {Kv("detail", "add_null_stage")});
     return;
   }
 
   if (initialized_) {
-    GetLogger()->warn("{}: Adding stage after initialization; stage may not be attached",
-                      kLogTag);
+    LogWarn(logevent::kSystemBoot, LogContext{std::string(kLogTag), "", 0, "", ""},
+            {Kv("detail", "add_stage_after_init"), Kv("stage", stage->Name())});
   }
 
-  GetLogger()->debug("{}: Adding pipeline stage: {}", kLogTag, stage->Name());
+  LogDebug(logevent::kSystemBoot, LogContext{std::string(kLogTag), "", 0, "", ""},
+           {Kv("detail", "add_stage"), Kv("stage", stage->Name())});
   stages_.push_back(std::move(stage));
 }
 
@@ -96,23 +113,25 @@ void PipelineScheduler::ClearStages(SessionContext& context) {
   }
   stages_.clear();
   initialized_ = false;
-  GetLogger()->info("{}: Cleared all pipeline stages", kLogTag);
+  LogInfo(logevent::kSystemBoot, MakeLogCtx(context), {Kv("detail", "pipeline_stages_cleared")});
 }
 
 void PipelineScheduler::Reset(SessionContext& context) {
-  GetLogger()->debug("{}: Resetting all pipeline stages", kLogTag);
+  LogDebug(logevent::kSystemBoot, MakeLogCtx(context), {Kv("detail", "pipeline_reset_begin")});
 
   // Call OnDetach and then OnAttach for each stage
   for (auto& stage : stages_) {
     stage->OnDetach(context);
     Status st = stage->OnAttach(context);
     if (!st.ok()) {
-      GetLogger()->error("{}: Stage '{}' failed to re-attach during reset: {}",
-                         kLogTag, stage->Name(), st.message());
+      LogError(logevent::kSessionEnd, MakeLogCtx(context),
+               {Kv("event_detail", "stage_reattach_failed"),
+                Kv("stage", stage->Name()),
+                Kv("err", st.message())});
     }
   }
 
-  GetLogger()->info("{}: Reset complete", kLogTag);
+  LogInfo(logevent::kSystemBoot, MakeLogCtx(context), {Kv("detail", "pipeline_reset_done")});
 }
 
 }  // namespace mos::vis

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -13,6 +14,8 @@ struct ControlRequest {
   float confidence = 0.0F;
   std::string text;
   std::string nlu_json;
+  std::string session_id;
+  std::uint64_t turn_id = 0;
 };
 
 struct ControlResult {
@@ -20,6 +23,8 @@ struct ControlResult {
   std::string action;
   std::string ws_payload_json;
   std::string reply_text;
+  std::string request_id;
+  std::string task_id;
 };
 
 class ControlEngine {

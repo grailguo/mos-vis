@@ -6,9 +6,9 @@
     "ring_seconds": 10,
     "input_device": "AIUI-USB-MC",
     "output_device": "rockchip-es8388",
-    "channel_select_mode": "fixed",
+    "channel_select_mode": "auto_track",
     "fixed_channel_index": 2,
-    "track_switch_consecutive": 3
+    "track_switch_consecutive": 2
   },
   "vad1": {
     "enabled": true,
@@ -29,10 +29,10 @@
   "vad2": {
     "enabled": true,
     "model_path": "./models/silero-vad-v4-rk3588/silero-vad-v4-rk3588.rknn",
-    "threshold": 0.5,
+    "threshold": 0.42,
     "window_samples": 512,
     "hop_samples": 160,
-    "start_frames": 3,
+    "start_frames": 2,
     "end_frames": 20,
     "hangover_ms": 320
   },
@@ -40,8 +40,8 @@
     "enabled": true,
     "model_dir": "./models/sherpa-onnx-rk3588-streaming-zipformer-bilingual-zh-en-2023-02-20",
     "chunk_samples": 320,
-    "preroll_ms": 400,
-    "tail_ms": 240
+    "preroll_ms": 600,
+    "tail_ms": 320
   },
   "tts": {
     "enabled": true,
@@ -51,7 +51,7 @@
   },
   "nlu": {
     "enabled": true,
-    "model_dir": "./models/nlu",
+    "model_dir": "",
     "provider": "cpu",
     "num_threads": 1
   },
@@ -67,8 +67,6 @@
     "license_user_name": "GuoLiang",
     "version": "3.6.2.0",
     "authorization_timeout_sec": 60,
-    "calibration_duration_sec": 900,
-    "analysis_duration_sec": 900,
     "start_calibration_parameter": {
       "cartridge_code": "CNC-0001",
       "cartridge_info": {

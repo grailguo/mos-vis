@@ -8,7 +8,10 @@
 #include <string>
 
 #include "mos/vis/audio/audio_ring_buffer.h"
+#include "mos/vis/asr/asr_engine.h"
 #include "mos/vis/config/app_config.h"
+#include "mos/vis/nlu/nlu_engine.h"
+#include "mos/vis/runtime/subsm/hotspot_subsms.h"
 #include "mos/vis/runtime/session_state.h"
 
 // Forward declarations for engine interfaces
@@ -19,8 +22,6 @@ class AsrEngine;
 class NluEngine;
 class ControlEngine;
 class TtsEngine;
-struct AsrResult;
-struct NluResult;
 
 // TTS task definition
 struct TtsTask {
@@ -51,6 +52,14 @@ struct SessionContext {
 
   // === Session State ===
   SessionState state = SessionState::kIdle;
+  std::string session_id;
+  std::uint64_t turn_id = 0;
+  bool keep_session_open = true;
+  std::string current_control_request_id;
+  std::uint64_t reply_playback_token = 0;
+  bool reply_tts_started = false;
+  bool barge_in_enabled = true;
+  std::chrono::steady_clock::time_point last_wake_timestamp{};
 
   // === Audio Reader Positions ===
   // Each stage maintains its own reader, but we track positions here
@@ -143,6 +152,16 @@ struct SessionContext {
     bool task_running = false;
     bool wake_ack_pending = false;
   } tts_state;
+
+  // === Local event bus for Layer-2 hotspot sub-state machines ===
+  subsm::LocalEventBus local_events;
+
+  struct SubsmState {
+    subsm::WakeState wake = subsm::WakeState::kWaitingWakeup;
+    subsm::AsrState asr = subsm::AsrState::kListening;
+    subsm::ReplyState reply = subsm::ReplyState::kResultSpeaking;
+    int wake_cooldown_ms = 2000;
+  } subsm_state;
 
   // === NLU & Control State ===
   struct NluControlState {

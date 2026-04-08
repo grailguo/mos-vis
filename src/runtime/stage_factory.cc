@@ -21,22 +21,20 @@ Status StageFactory::CreateStages(PipelineScheduler* scheduler, SessionContext& 
   // 1. ControlNotificationStage
   // 2. Vad1Stage
   // 3. KwsStage
-  // 4. Vad2Stage
-  // 5. RecognizingStage (but note: original order is Vad2, Recognizing, Executing, ASR, TTS)
-  // 6. ExecutingStage
-  // 7. AsrStage
-  // 8. TtsStage
-  // However, note that ASR stage runs after Vad2 stage (speech detection) and before TTS.
-  // We'll follow the original tick order as closely as possible.
+  // 4. TtsStage (moved earlier to reduce KWS -> ACK start latency)
+  // 5. Vad2Stage
+  // 6. AsrStage
+  // 7. RecognizingStage
+  // 8. ExecutingStage
 
   scheduler->AddStage(std::make_unique<ControlNotificationStage>());
   scheduler->AddStage(std::make_unique<Vad1Stage>());
   scheduler->AddStage(std::make_unique<KwsStage>());
+  scheduler->AddStage(std::make_unique<TtsStage>());
   scheduler->AddStage(std::make_unique<Vad2Stage>());
   scheduler->AddStage(std::make_unique<AsrStage>());
   scheduler->AddStage(std::make_unique<RecognizingStage>());
   scheduler->AddStage(std::make_unique<ExecutingStage>());
-  scheduler->AddStage(std::make_unique<TtsStage>());
 
   // Initialize the scheduler with the context (calls OnAttach for each stage)
   return scheduler->Initialize(context);

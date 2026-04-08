@@ -1,11 +1,15 @@
 #include "mos/vis/tts/tts_engine.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <system_error>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "mos/vis/audio/audio_playback.h"
 #include "mos/vis/common/logging.h"
@@ -100,12 +104,12 @@ class SherpaTtsEngine final : public TtsEngine {
       return playback_st;
     }
 
-    GetLogger()->info(
-        "TTS initialized: model={} use_int8={} int8_size={} data_dir={}",
-        model,
-        (model == model_int8) ? "true" : "false",
-        static_cast<unsigned long long>(int8_size),
-        has_vits_data_dir ? data_dir : "<none>");
+    LogInfo(logevent::kSystemBoot, LogContext{"TtsEngine", "", 0, "", ""},
+            {Kv("detail", "tts_initialized"),
+             Kv("model", BasenamePath(model)),
+             Kv("use_int8", (model == model_int8) ? 1 : 0),
+             Kv("int8_size", static_cast<unsigned long long>(int8_size)),
+             Kv("data_dir", has_vits_data_dir ? BasenamePath(data_dir) : "<none>")});
     return Status::Ok();
   }
 
@@ -116,7 +120,126 @@ class SherpaTtsEngine final : public TtsEngine {
     if (tts_ == nullptr) {
       return Status::Internal("TTS not initialized");
     }
+    CachedAudio generated_audio;
+    const CachedAudio* audio_for_playback = nullptr;
+    if (config_.fixed_phrase_cache) {
+      auto it = fixed_phrase_cache_.find(text);
+      if (it != fixed_phrase_cache_.end()) {
+        audio_for_playback = &it->second;
+      }
+    }
+    if (audio_for_playback == nullptr) {
+      Status gen_st = GenerateAudio(text, &generated_audio);
+      if (!gen_st.ok()) {
+        return gen_st;
+      }
+      if (config_.fixed_phrase_cache) {
+        fixed_phrase_cache_[text] = generated_audio;
+        audio_for_playback = &fixed_phrase_cache_[text];
+      } else {
+        audio_for_playback = &generated_audio;
+      }
+    }
 
+    if (playback_ == nullptr) {
+      return Status::Internal("audio playback is not initialized");
+    }
+    return playback_->PlaySamples(audio_for_playback->samples.data(),
+                                  audio_for_playback->samples.size(),
+                                  audio_for_playback->sample_rate);
+  }
+
+  Status PlayFile(const std::string& path) override {
+    if (playback_ == nullptr) {
+      return Status::Internal("audio playback is not initialized");
+    }
+    return playback_->PlayWavFile(path);
+  }
+
+  Status PlayTone(int frequency_hz, int duration_ms, float amplitude) override {
+    if (playback_ == nullptr) {
+      return Status::Internal("audio playback is not initialized");
+    }
+
+    const int sample_rate = 44100;
+    const int freq = std::max(80, frequency_hz);
+    const int duration = std::max(50, duration_ms);
+    const float amp = std::max(0.01F, std::min(1.0F, amplitude));
+    const std::size_t total_samples =
+        static_cast<std::size_t>((static_cast<long long>(sample_rate) * duration) / 1000LL);
+    if (total_samples == 0U) {
+      return Status::Ok();
+    }
+
+    std::vector<float> tone(total_samples, 0.0F);
+    const double pi = std::acos(-1.0);
+    const double phase_step = (2.0 * pi * static_cast<double>(freq)) / static_cast<double>(sample_rate);
+    const std::size_t fade_samples =
+        std::min<std::size_t>(total_samples / 4U, static_cast<std::size_t>(sample_rate / 100U));  // 10ms max
+
+    double phase = 0.0;
+    for (std::size_t i = 0; i < total_samples; ++i) {
+      float env = 1.0F;
+      if (fade_samples > 0U) {
+        if (i < fade_samples) {
+          env = static_cast<float>(i) / static_cast<float>(fade_samples);
+        } else if ((total_samples - i) < fade_samples) {
+          env = static_cast<float>(total_samples - i) / static_cast<float>(fade_samples);
+        }
+      }
+      tone[i] = amp * env * static_cast<float>(std::sin(phase));
+      phase += phase_step;
+    }
+
+    return playback_->PlaySamples(tone.data(), tone.size(), sample_rate);
+  }
+
+  Status PreloadFixedPhrases(const std::vector<std::string>& texts) override {
+    if (!config_.fixed_phrase_cache || texts.empty()) {
+      return Status::Ok();
+    }
+    if (tts_ == nullptr) {
+      return Status::Internal("TTS not initialized");
+    }
+
+    std::unordered_set<std::string> unique_texts;
+    std::size_t loaded = 0;
+    for (const auto& text : texts) {
+      if (text.empty() || !unique_texts.insert(text).second) {
+        continue;
+      }
+      if (fixed_phrase_cache_.find(text) != fixed_phrase_cache_.end()) {
+        continue;
+      }
+      CachedAudio cached;
+      Status gen_st = GenerateAudio(text, &cached);
+      if (!gen_st.ok()) {
+        LogWarn(logevent::kSystemBoot, LogContext{"TtsEngine", "", 0, "", ""},
+                {Kv("detail", "fixed_phrase_preload_failed"),
+                 Kv("text", MaskSummary(text, 16)),
+                 Kv("err", gen_st.message())});
+        continue;
+      }
+      fixed_phrase_cache_[text] = std::move(cached);
+      ++loaded;
+    }
+
+    LogInfo(logevent::kSystemBoot, LogContext{"TtsEngine", "", 0, "", ""},
+            {Kv("detail", "fixed_phrase_preload_done"),
+             Kv("count", static_cast<unsigned long long>(loaded))});
+    return Status::Ok();
+  }
+
+ private:
+  struct CachedAudio {
+    std::vector<float> samples;
+    int sample_rate = 0;
+  };
+
+  Status GenerateAudio(const std::string& text, CachedAudio* out) {
+    if (out == nullptr) {
+      return Status::InvalidArgument("cached audio output is null");
+    }
     SherpaOnnxGenerationConfig gen_cfg;
     std::memset(&gen_cfg, 0, sizeof(gen_cfg));
     gen_cfg.sid = 0;
@@ -130,27 +253,17 @@ class SherpaTtsEngine final : public TtsEngine {
       return Status::Internal("SherpaOnnxOfflineTtsGenerateWithConfig failed");
     }
 
-    Status st = Status::Internal("audio playback is not initialized");
-    if (playback_ != nullptr) {
-      st = playback_->PlaySamples(audio->samples,
-                                  static_cast<std::size_t>(audio->n),
-                                  static_cast<int>(audio->sample_rate));
-    }
+    out->sample_rate = static_cast<int>(audio->sample_rate);
+    out->samples.assign(audio->samples,
+                        audio->samples + static_cast<std::size_t>(audio->n));
     SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
-    return st;
+    return Status::Ok();
   }
 
-  Status PlayFile(const std::string& path) override {
-    if (playback_ == nullptr) {
-      return Status::Internal("audio playback is not initialized");
-    }
-    return playback_->PlayWavFile(path);
-  }
-
- private:
   TtsConfig config_;
   const SherpaOnnxOfflineTts* tts_ = nullptr;
   std::unique_ptr<AudioPlayback> playback_;
+  std::unordered_map<std::string, CachedAudio> fixed_phrase_cache_;
 };
 
 #else
@@ -164,6 +277,9 @@ class SherpaTtsEngine final : public TtsEngine {
     return Status::Internal("Sherpa-ONNX runtime not enabled");
   }
   Status PlayFile(const std::string&) override {
+    return Status::Internal("Sherpa-ONNX runtime not enabled");
+  }
+  Status PlayTone(int, int, float) override {
     return Status::Internal("Sherpa-ONNX runtime not enabled");
   }
 };

@@ -37,6 +37,9 @@ class KwsStage : public PipelineStage {
   // Handle a detected keyword hit
   void HandleKwsHit(SessionContext& context, const std::string& keyword,
                     const std::string& detail_json);
+  void ConsumeWakeEvents(SessionContext& context,
+                         const std::string& keyword,
+                         const std::string& detail_json);
 
   // Audio reader for this stage
   std::unique_ptr<AudioReader> reader_;

@@ -49,6 +49,7 @@ class SessionController {
   std::shared_ptr<NluEngine> nlu_;
   std::shared_ptr<ControlEngine> control_;
   std::shared_ptr<TtsEngine> tts_;
+  bool startup_beep_played_ = false;
 };
 
 }  // namespace mos::vis

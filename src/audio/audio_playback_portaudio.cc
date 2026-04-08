@@ -3,11 +3,18 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cerrno>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#include <sys/resource.h>
+#endif
 
 #include <portaudio.h>
 
@@ -16,6 +23,12 @@
 
 namespace mos::vis {
 namespace {
+
+LogContext AudioPlaybackLogCtx() {
+  LogContext ctx;
+  ctx.module = "AudioPlayback";
+  return ctx;
+}
 
 class PortAudioPlayback final : public AudioPlayback {
  public:
@@ -65,6 +78,7 @@ class PortAudioPlayback final : public AudioPlayback {
     if (!st.ok()) {
       return st;
     }
+    TryBoostPlaybackThreadPriority();
 
     const std::size_t max_frames_per_write = 1024U;
     std::size_t offset = 0U;
@@ -104,7 +118,8 @@ class PortAudioPlayback final : public AudioPlayback {
         return Status::Internal("unsupported playback stream format");
       }
       if (err == paOutputUnderflowed) {
-        GetLogger()->warn("Pa_WriteStream underflow (continuing playback)");
+        LogWarn(logevent::kAudioOverrun, AudioPlaybackLogCtx(),
+                {Kv("detail", "pa_write_underflow_continue")});
         offset += frames;
         continue;
       }
@@ -275,9 +290,9 @@ class PortAudioPlayback final : public AudioPlayback {
       if (matched.has_value()) {
         return matched->index;
       }
-      GetLogger()->warn(
-          "output device '{}' not found by partial match. Falling back to default output device.",
-          config_.output_device);
+      LogWarn(logevent::kAudioDeviceOpen, AudioPlaybackLogCtx(),
+              {Kv("detail", "output_device_not_found_fallback_default"),
+               Kv("output_device", config_.output_device)});
     }
     return Pa_GetDefaultOutputDevice();
   }
@@ -309,8 +324,13 @@ class PortAudioPlayback final : public AudioPlayback {
       return Status::NotFound("no output audio device available");
     }
 
-    const unsigned long configured_fpb = static_cast<unsigned long>(std::max(1, config_.capture_chunk_samples));
+    const unsigned long configured_fpb =
+        static_cast<unsigned long>(std::max(1, config_.capture_chunk_samples));
+    const unsigned long fpb_1024 = std::max<unsigned long>(configured_fpb, 1024UL);
+    const unsigned long fpb_2048 = std::max<unsigned long>(configured_fpb, 2048UL);
     const std::vector<unsigned long> fpb_candidates = {
+        fpb_2048,
+        fpb_1024,
         configured_fpb,
         paFramesPerBufferUnspecified,
     };
@@ -373,13 +393,13 @@ class PortAudioPlayback final : public AudioPlayback {
             active_sample_rate_hz_ = sample_rate_hz;
             output_channels_ = channels;
             sample_format_ = sample_format;
-            GetLogger()->info("Opened output stream on device: [{}] {} | sample_rate={} | channels={} | format={} | fpb={}",
-                              device_index,
-                              output_info->name,
-                              sample_rate_hz,
-                              channels,
-                              (sample_format == paFloat32) ? "float32" : "int16",
-                              (frames_per_buffer == paFramesPerBufferUnspecified) ? 0UL : frames_per_buffer);
+            LogInfo(logevent::kAudioDeviceOpen, AudioPlaybackLogCtx(),
+                    {Kv("index", device_index),
+                     Kv("name", output_info->name),
+                     Kv("sr", sample_rate_hz),
+                     Kv("ch", channels),
+                     Kv("format", (sample_format == paFloat32) ? "float32" : "int16"),
+                     Kv("buf", (frames_per_buffer == paFramesPerBufferUnspecified) ? 0UL : frames_per_buffer)});
             return Status::Ok();
           }
         }
@@ -389,12 +409,47 @@ class PortAudioPlayback final : public AudioPlayback {
     return Status::Internal("Pa_OpenStream(output) failed after fallbacks: " + last_error);
   }
 
+  void TryBoostPlaybackThreadPriority() {
+    if (priority_boost_attempted_) {
+      return;
+    }
+    priority_boost_attempted_ = true;
+
+#if defined(__linux__)
+    sched_param sp{};
+    const int max_prio = sched_get_priority_max(SCHED_FIFO);
+    if (max_prio > 0) {
+      sp.sched_priority = std::max(1, max_prio / 4);
+      const int rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+      if (rc == 0) {
+        LogInfo(logevent::kAudioDeviceOpen, AudioPlaybackLogCtx(),
+                {Kv("detail", "playback_thread_priority_boosted"),
+                 Kv("policy", "SCHED_FIFO"),
+                 Kv("prio", sp.sched_priority)});
+        return;
+      }
+    }
+
+    errno = 0;
+    if (setpriority(PRIO_PROCESS, 0, -5) == 0) {
+      LogInfo(logevent::kAudioDeviceOpen, AudioPlaybackLogCtx(),
+              {Kv("detail", "playback_thread_nice_boosted"), Kv("nice", -5)});
+      return;
+    }
+
+    LogDebug(logevent::kAudioOverrun, AudioPlaybackLogCtx(),
+             {Kv("detail", "playback_thread_priority_boost_failed"),
+              Kv("errno", errno)});
+#endif
+  }
+
   AudioConfig config_;
   bool pa_initialized_ = false;
   PaStream* stream_ = nullptr;
   int active_sample_rate_hz_ = 0;
   int output_channels_ = 1;
   PaSampleFormat sample_format_ = paFloat32;
+  bool priority_boost_attempted_ = false;
 };
 
 }  // namespace

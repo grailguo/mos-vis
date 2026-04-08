@@ -108,11 +108,12 @@ class SherpaKwsEngine final : public KwsEngine {
       return Status::Internal("SherpaOnnxCreateKeywordStream failed");
     }
 
-    GetLogger()->info("KWS initialized: model_dir={} keywords_file={} keywords_score={} keywords_threshold={}",
-                      config.model_dir,
-                      keywords_path_,
-                      cfg.keywords_score,
-                      cfg.keywords_threshold);
+    LogInfo(logevent::kSystemBoot, LogContext{"KwsEngine", "", 0, "", ""},
+            {Kv("detail", "kws_initialized"),
+             Kv("model_dir", BasenamePath(config.model_dir)),
+             Kv("keywords_file", BasenamePath(keywords_path_)),
+             Kv("keywords_score", cfg.keywords_score),
+             Kv("keywords_threshold", cfg.keywords_threshold)});
     return Status::Ok();
   }
 

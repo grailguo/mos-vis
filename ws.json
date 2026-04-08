@@ -1,0 +1,53 @@
+:{
+  "method": "authorization",
+  "parameter": {
+    "client_name": "LAPTOP-LH5BE773",
+    "client_version": "4.1.0.1",
+    "client_key": "",
+    "compatibility_mode": 0,
+    "license_user_name": "GuoLiang"
+  },
+  "version": "3.6.2.0"
+}
+
+
+{"method":"authorization","result":{"code":0,"compatibility_mode":0,"details":"","license_user_name":"GuoLiang","message":"","sw_version":"v4.2.2.1-release","token":"5y\u001ch]rnwa\u001b9 jmnrke`*/./:\u001e+\u001dplks 4*.+\u001dpohsm]gh!5\"p_sn\u001c$\u001etneo\u001b9 jmnrke`X`bgaj!x","user_id":"::ffff:172.16.1.9:50761","user_name":"","user_role":"admin"},"version":"3.4.0"}
+{"method":"authorization_notify","protocol":"4.1.1","result":{"client_name":"LAPTOP-LH5BE773","code":0,"compatibility_mode":0,"details":"","license_user_name":"GuoLiang","message":"accepted","user_id":"::ffff:172.16.1.9:56206","user_name":"","user_role":"admin"},"sequence":0,"version":2}
+{"error":{"client_name":"LAPTOP-LH5BE773","client_version":"4.1.0.1","code":-10005,"compatibility_mode":0,"details":"","license_user_name":"GuoLiang","message":"terminated","user_id":"::ffff:172.16.1.9:56206","user_name":"","user_role":"admin"},"method":"authorization_notify","protocol":"4.1.1","sequence":0,"version":2}
+
+{
+  "method": "start_calibration",   "parameter": {
+  "cartridge_code": "CNC-0001",
+  "cartridge_info": {
+    "spray_voltage_neg": 2000.0,
+    "spray_voltage_pos": 2000.0
+  },
+  "scan_data_param": {
+    "save_report": 1
+  },
+  "scan_mode_list": [
+    "normal"
+  ],
+  "scan_mode_params": [
+    {
+      "scan_mode": "normal",
+      "sub_params": [
+        "50,1000"
+      ]
+    }
+  ],
+  "trap_loc_list": [
+    "q2"
+  ],
+  "pressure_enabled": 0,
+  "gain_enabled": 1,
+  "mass_enabled": 1
+}
+
+
+{"method":"start_calibration","result":{"analysis_uuid":"2026_04_07_13_44_41_216","code":0},"version":"3.4.0"}
+
+{"method":"analysis_result_notify","result":{"analysis_mode":"Automatically","analysis_type":"calibration","analysis_type_sub":"Calibration_Mass","analysis_uuid":"2026_04_07_13_44_41_249","calibration_mode":"质量轴校准 (常规)","code":0,"expected_result":[],"message":"Success","mrz_file":"/opt/purspec/client/0.Data/Calibration/2026_04_07_13_44_41/calibration_mass_2026_04_07_13_44_41_249_pass.mrz","peaks":{"matched_peaks_q2":[{"dac":0,"index":-1,"intensity":0,"mz":50.01196599608332,"position":0,"properties":{"area":0,"left_base":0,"left_edge":0,"left_ip":0,"left_threshold":0,"plateau_size":0,"pos_wlen":0,"prominence":0,"right_base":0,"right_edge":0,"right_ip":0,"right_threshold":0,"tic":0,"width":0,"width_height":0}},...]}}}
+
+{"method":"calibration_result_notify","result":{"code":0,"data":{"analysis_type":"calibration","analysis_uuid":"2026_04_07_13_44_41_216","info":["1. 质量轴校准 (常规): 通过"],"result":[{"analysis_result":1,"analysis_type":"Calibration_Mass",""calib_mode":""质量轴校准 (常规))","code":0,"mrz_file":"/opt/purspec/client/0.Data/Calibration/2026_04_07_13_44_41/calibration_mass_2026_04_07_13_44_41_249_pass.mrz","scan_mode":"normal"}],"version":2},"version":2},"version":"3.4.0"}
+
