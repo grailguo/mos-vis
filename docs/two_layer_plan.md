@@ -1,5 +1,7 @@
 # Two-Layer State Machine Refactor Plan
 
+参见 [state_machine_v3.md](./state_machine_v3.md) 获取最新状态机设计文档。
+
 ## Summary
 
 本方案以现有 `SessionState + stage` 流水线为主骨架，不做全量重写。  

@@ -8,7 +8,7 @@ mos_vis 状态机到 C++ 枚举/Transition Map 映射（v1）
 - Guard/Action 枚举
 - Transition Map（表驱动）
 
-来源语义与 [state_machine.md](/home/firefly/workspace/mos-vis/docs/state_machine.md) 保持一致。
+来源语义与 [state_machine_v3.md](./state_machine_v3.md) 保持一致（本文档为 v1 历史版本，详细设计请参考 v3）。
 
 2. 推荐数据结构
 

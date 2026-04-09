@@ -1,4 +1,7 @@
 mos_vis 状态机到 C++ 枚举/Transition Map 映射（v2）
+
+> **注意**：本文档为历史版本，已被 [state_machine_v3.md](./state_machine_v3.md) 替代。请参考 v3 文档获取最新设计。
+
 1. 设计修订目标
 
 相对 v1，v2 主要增加：

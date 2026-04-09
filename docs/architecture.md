@@ -39,15 +39,16 @@ VoiceInteractiveAgent
 - I/O 队列：线程安全队列。
 
 ## 3. Pipeline 状态机
-统一状态：`IDLE -> LISTENING -> RECOGNIZING -> EXECUTING -> SPEAKING -> IDLE`
+详细状态机定义参见 [state_machine_v3.md](./state_machine_v3.md)（16 状态双层架构）。
 
-- WakeupPipeline：`IDLE -> VAD1 -> KWS -> ACK(TTS) -> LISTENING`
-- RecognitionPipeline：`LISTENING -> VAD2 -> ASR -> RECOGNIZING`
-- ControlPipeline：`RECOGNIZING -> NLU(control) -> WS -> EXECUTING -> SPEAKING`
-- KnowledgePipeline：`RECOGNIZING -> NLU(knowledge) -> RAG -> SPEAKING`
-- Combined control path：`IDLE -> VAD1 -> KWS -> ACK(TTS) -> LISTENING -> VAD2 -> ASR -> RECOGNIZING -> NLU(control) -> WS -> EXECUTING -> SPEAKING`
+简化视图：`kWaitingWakeup → kRecognizingCommand → kUnderstandingIntent → kExecutingControlSync → kResultSpeaking → kWaitingCommandSpeech`
 
-打断策略：`interrupt_enabled=true` 时，`SPEAKING` 中检测到唤醒词立即中断并进入 `LISTENING`。
+- 唤醒路径：`kWaitingWakeup → kWakeDetecting → kAckSpeaking → kWaitingCommandSpeech`
+- 识别路径：`kWaitingCommandSpeech → kRecognizingCommand → kUnderstandingIntent`
+- 控制路径：`kUnderstandingIntent → kExecutingControlSync → kWaitingControlAsync → kResultSpeaking`
+- 知识路径：`kUnderstandingIntent → kQueryingRag → kResultSpeaking`
+
+打断策略：`interrupt_enabled=true` 时，`kResultSpeaking` 中检测到用户抢话（barge-in）立即中断并进入 `kRecognizingCommand`。
 
 ## 4. 硬软协同
 
@@ -103,3 +104,4 @@ VoiceInteractiveAgent
 - 总规格：[SystemDesign.md](../SystemDesign.md)
 - 可靠性专题：[reliability.md](./reliability.md)
 - 安全专题：[security.md](./security.md)
+- 状态机详细设计：[state_machine_v3.md](./state_machine_v3.md)

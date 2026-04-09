@@ -1,4 +1,6 @@
-### `docs/state_machine_v3.md` 生成计划
+### `docs/state_machine_v3.md` 生成计划 (已实现)
+
+> **注意**：本计划文档已执行完成，完整实现参见 [state_machine_v3.md](./state_machine_v3.md)。本文档保留供历史参考。
 
 ### Summary
 产出一份新的状态机设计文档 `docs/state_machine_v3.md`，用于替代现有 v1/v2 的分散描述，聚焦“主状态机 + 子状态机（wake/asr/reply）”双层实现，并明确三项核心需求：

@@ -9,6 +9,7 @@
 - 架构专题：`docs/architecture.md`
 - 可靠性专题：`docs/reliability.md`
 - 安全专题：`docs/security.md`
+- 状态机详细设计：`docs/state_machine_v3.md`
 
 ---
 
@@ -102,38 +103,40 @@ WebSocket I/O Thread
 
 ## 3. Pipeline 状态机
 
-### 3.1 统一会话状态
-`IDLE -> LISTENING -> RECOGNIZING -> EXECUTING -> SPEAKING -> IDLE`
+详细状态机设计参见 [docs/state_machine_v3.md](docs/state_machine_v3.md)（16 状态双层架构）。
+
+### 3.1 统一会话状态（简化视图）
+`kWaitingWakeup → kRecognizingCommand → kUnderstandingIntent → kExecutingControlSync → kResultSpeaking → kWaitingCommandSpeech`
 
 ### 3.2 WakeupPipeline
 
 ```text
-IDLE -> VAD1 Gate Open -> KWS Hit -> Wake ACK(TTS) -> LISTENING
+kWaitingWakeup -> VAD1 Gate Open -> KWS Hit -> Wake ACK(TTS) -> kWaitingCommandSpeech
 ```
 
 ### 3.3 RecognitionPipeline
 
 ```text
-LISTENING -> VAD2 Speech Start -> ASR Streaming -> VAD2 Speech End -> RECOGNIZING
+kWaitingCommandSpeech -> VAD2 Speech Start -> ASR Streaming -> VAD2 Speech End -> kRecognizingCommand -> kUnderstandingIntent
 ```
 
 ### 3.4 ControlPipeline
 
 ```text
-RECOGNIZING -> NLU(DeviceControl) -> WS Request -> EXECUTING -> SPEAKING -> IDLE
+kUnderstandingIntent -> NLU(DeviceControl) -> WS Request -> kExecutingControlSync -> kWaitingControlAsync -> kResultSpeaking -> kWaitingCommandSpeech
 ```
 
 ### 3.5 KnowledgePipeline
 
 ```text
-RECOGNIZING -> NLU(KnowledgeQuery) -> RAG HTTP -> SPEAKING -> IDLE
+kUnderstandingIntent -> NLU(KnowledgeQuery) -> RAG HTTP -> kQueryingRag -> kResultSpeaking -> kWaitingCommandSpeech
 ```
 
 ### 3.6 打断策略
-- 当 `interrupt_enabled=true` 且系统处于 `SPEAKING`，若检测到新唤醒词：
+- 当 `interrupt_enabled=true` 且系统处于 `kResultSpeaking`，若检测到用户抢话（barge-in）：
   - 立即停止 TTS。
   - 清理当前播报任务。
-  - 状态切换到 `LISTENING`。
+  - 状态切换到 `kRecognizingCommand`。
 
 ---
 
