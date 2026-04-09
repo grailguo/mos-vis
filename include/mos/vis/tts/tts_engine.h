@@ -29,5 +29,6 @@ class TtsEngine {
 };
 
 std::unique_ptr<TtsEngine> CreateTtsEngine();
+std::unique_ptr<TtsEngine> CreateVitsMeloTtsEngine();
 
 }  // namespace mos::vis

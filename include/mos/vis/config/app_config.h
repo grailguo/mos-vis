@@ -10,6 +10,7 @@ struct AudioConfig {
   int channels = 1;
   int capture_chunk_samples = 320;
   int ring_seconds = 10;
+  float playback_gain = 1.0F;
   std::string input_device;
   std::string output_device;
   std::string channel_select_mode = "auto_track";
@@ -47,9 +48,17 @@ struct AsrConfig {
 
 struct TtsConfig {
   bool enabled = true;
+  std::string engine = "sherpa";
   std::string model_dir;
+  std::string provider = "cpu";
+  int num_threads = 1;
+  int max_num_sentences = 2;
+  float silence_scale = 0.2F;
+  std::string reference_wav;
+  std::string reference_text;
   bool use_int8 = true;
   bool fixed_phrase_cache = true;
+  float volume_gain = 1.6F;
 };
 
 struct NluConfig {

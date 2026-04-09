@@ -40,7 +40,7 @@ WakeDecision StepWake(WakeState current, WakeEvent event, bool in_cooldown) {
 
 AsrDecision StepAsr(AsrState current, AsrEvent event) {
   using Row = Transition<AsrState, AsrEvent, AsrGuard, AsrAction>;
-  static constexpr std::array<Row, 4> kTable{{
+  static constexpr std::array<Row, 6> kTable{{
       {AsrState::kListening, AsrEvent::kAsrFinalNonEmpty, AsrGuard::kAlways,
        AsrState::kRecognizing, AsrAction::kToRecognizing},
       {AsrState::kFinalizing, AsrEvent::kAsrFinalNonEmpty, AsrGuard::kAlways,
@@ -48,6 +48,10 @@ AsrDecision StepAsr(AsrState current, AsrEvent event) {
       {AsrState::kListening, AsrEvent::kAsrFinalEmpty, AsrGuard::kAlways,
        AsrState::kListening, AsrAction::kPrepareRetryReply},
       {AsrState::kListening, AsrEvent::kAsrTimeout, AsrGuard::kAlways,
+       AsrState::kListening, AsrAction::kPrepareRetryReply},
+      {AsrState::kFinalizing, AsrEvent::kAsrFinalEmpty, AsrGuard::kAlways,
+       AsrState::kListening, AsrAction::kPrepareRetryReply},
+      {AsrState::kFinalizing, AsrEvent::kAsrTimeout, AsrGuard::kAlways,
        AsrState::kListening, AsrAction::kPrepareRetryReply},
   }};
 
@@ -103,4 +107,3 @@ ReplyDecision StepReply(ReplyState current,
 }
 
 }  // namespace mos::vis::subsm
-

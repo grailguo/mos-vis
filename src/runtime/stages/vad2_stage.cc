@@ -77,6 +77,10 @@ Status Vad2Stage::OnAttach(SessionContext& context) {
   // Pre-allocate buffer
   vad_window_buffer_.resize(vad_window_samples_, 0.0F);
 
+  pre_listening_since_.reset();
+  last_observed_state_ = context.state;
+  pre_listening_idle_timeout_sec_ = 15;
+
   // Compute max windows per tick
   const std::size_t nominal_windows_per_tick =
       std::max<std::size_t>(1, capture_chunk_samples_ / vad_hop_samples_);
@@ -105,6 +109,33 @@ bool Vad2Stage::CanProcess(SessionState state) const {
 Status Vad2Stage::Process(SessionContext& context) {
   if (!context.config.vad2.enabled || context.vad2 == nullptr) {
     return Status::Ok();
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  if (context.state != last_observed_state_) {
+    if (context.state == SessionState::kPreListening) {
+      pre_listening_since_ = now;
+    } else {
+      pre_listening_since_.reset();
+    }
+    last_observed_state_ = context.state;
+  }
+  if (context.state == SessionState::kPreListening) {
+    if (!pre_listening_since_.has_value()) {
+      pre_listening_since_ = now;
+    }
+    if ((now - *pre_listening_since_) >=
+        std::chrono::seconds(std::max(1, pre_listening_idle_timeout_sec_))) {
+      context.state = SessionState::kIdle;
+      context.reply_tts_started = false;
+      context.current_control_request_id.clear();
+      LogInfo(logevent::kSessionEnd, MakeLogCtx(context),
+              {Kv("reason", "pre_listening_no_speech_timeout_to_idle"),
+               Kv("timeout_sec", pre_listening_idle_timeout_sec_)});
+      pre_listening_since_.reset();
+      last_observed_state_ = context.state;
+      return Status::Ok();
+    }
   }
 
   std::size_t processed_windows = 0;

@@ -1,12 +1,20 @@
 #include "mos/vis/config/app_config.h"
 
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include "mos/vis/common/logging.h"
+
 namespace mos::vis {
 namespace {
 using json = nlohmann::json;
+
+constexpr float kGainMin = 0.1F;
+constexpr float kGainMax = 4.0F;
+constexpr float kRecommendedCombinedGainMax = 3.0F;
 
 std::string ResolvePathFromConfigDir(const std::filesystem::path& config_dir,
                                      const std::string& value) {
@@ -45,6 +53,30 @@ std::string JsonFieldToString(const json& node) {
   }
   return node.dump();
 }
+
+float ClampGainWithWarning(float value, const char* key) {
+  float clamped = value;
+  if (clamped < kGainMin) {
+    clamped = kGainMin;
+  } else if (clamped > kGainMax) {
+    clamped = kGainMax;
+  }
+  if (clamped != value) {
+    LogWarn(logevent::kSystemBoot, LogContext{"AppConfig", "", 0, "", ""},
+            {Kv("detail", "config_value_clamped"),
+             Kv("key", key),
+             Kv("input", value),
+             Kv("clamped", clamped),
+             Kv("range", "0.1~4.0")});
+  }
+  return clamped;
+}
+
+std::string NormalizeTtsEngineId(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return value;
+}
 }
 
 Status AppConfig::LoadFromFile(const std::string& path, AppConfig* config) {
@@ -66,6 +98,7 @@ Status AppConfig::LoadFromFile(const std::string& path, AppConfig* config) {
     config->audio.channels = a.value("channels", 1);
     config->audio.capture_chunk_samples = a.value("capture_chunk_samples", 320);
     config->audio.ring_seconds = a.value("ring_seconds", 10);
+    config->audio.playback_gain = a.value("playback_gain", config->audio.playback_gain);
     config->audio.input_device = a.value("input_device", "");
     config->audio.output_device = a.value("output_device", "");
     config->audio.channel_select_mode = a.value("channel_select_mode", "auto_track");
@@ -107,9 +140,89 @@ Status AppConfig::LoadFromFile(const std::string& path, AppConfig* config) {
 
     const auto& tts = j.at("tts");
     config->tts.enabled = tts.value("enabled", true);
-    config->tts.model_dir = ResolvePathFromConfigDir(config_dir, tts.value("model_dir", ""));
-    config->tts.use_int8 = tts.value("use_int8", true);
-    config->tts.fixed_phrase_cache = tts.value("fixed_phrase_cache", true);
+    if (!tts.contains("engine") || !tts.at("engine").is_string() ||
+        tts.at("engine").get<std::string>().empty()) {
+      return Status::InvalidArgument("tts.engine is required and must be a non-empty string");
+    }
+    config->tts.engine = NormalizeTtsEngineId(tts.at("engine").get<std::string>());
+    if (config->tts.engine != "sherpa" && config->tts.engine != "vits_melo") {
+      return Status::InvalidArgument(
+          "unsupported tts.engine: " + config->tts.engine +
+          " (supported: sherpa, vits_melo)");
+    }
+
+    if (tts.contains("common") && tts.at("common").is_object()) {
+      const auto& common = tts.at("common");
+      config->tts.fixed_phrase_cache =
+          common.value("fixed_phrase_cache", config->tts.fixed_phrase_cache);
+      config->tts.volume_gain = common.value("volume_gain", config->tts.volume_gain);
+    } else {
+      config->tts.fixed_phrase_cache = tts.value("fixed_phrase_cache", true);
+      config->tts.volume_gain = tts.value("volume_gain", config->tts.volume_gain);
+    }
+
+    const bool has_engines = tts.contains("engines") && tts.at("engines").is_object();
+    const bool has_engine_node =
+        has_engines && tts.at("engines").contains(config->tts.engine) &&
+        tts.at("engines").at(config->tts.engine).is_object();
+    if (has_engine_node) {
+      const auto& selected = tts.at("engines").at(config->tts.engine);
+      config->tts.model_dir =
+          ResolvePathFromConfigDir(config_dir, selected.value("model_dir", ""));
+      config->tts.provider = selected.value("provider", config->tts.provider);
+      config->tts.num_threads = selected.value("num_threads", config->tts.num_threads);
+      config->tts.max_num_sentences =
+          selected.value("max_num_sentences", config->tts.max_num_sentences);
+      config->tts.silence_scale =
+          selected.value("silence_scale", config->tts.silence_scale);
+      config->tts.reference_wav =
+          ResolvePathFromConfigDir(config_dir, selected.value("reference_wav", ""));
+      config->tts.reference_text =
+          selected.value("reference_text", config->tts.reference_text);
+      if (config->tts.engine == "vits_melo") {
+        config->tts.use_int8 = selected.value("use_int8", config->tts.use_int8);
+      } else {
+        config->tts.use_int8 = selected.value("use_int8", true);
+      }
+    } else {
+      // Backward-compatible fallback for legacy flat keys under tts.*
+      config->tts.model_dir =
+          ResolvePathFromConfigDir(config_dir, tts.value("model_dir", ""));
+      config->tts.use_int8 = tts.value("use_int8", config->tts.use_int8);
+      config->tts.provider = tts.value("provider", config->tts.provider);
+      config->tts.num_threads = tts.value("num_threads", config->tts.num_threads);
+      config->tts.max_num_sentences =
+          tts.value("max_num_sentences", config->tts.max_num_sentences);
+      config->tts.silence_scale = tts.value("silence_scale", config->tts.silence_scale);
+      config->tts.reference_wav =
+          ResolvePathFromConfigDir(config_dir, tts.value("reference_wav", ""));
+      config->tts.reference_text =
+          tts.value("reference_text", config->tts.reference_text);
+
+      LogWarn(logevent::kSystemBoot, LogContext{"AppConfig", "", 0, "", ""},
+              {Kv("detail", "tts_legacy_config_fallback"),
+               Kv("engine", config->tts.engine),
+               Kv("hint", "use tts.common + tts.engines.<engine_id> schema")});
+    }
+
+    if (config->tts.model_dir.empty()) {
+      return Status::InvalidArgument(
+          "tts.engines." + config->tts.engine + ".model_dir is required");
+    }
+
+    config->audio.playback_gain =
+        ClampGainWithWarning(config->audio.playback_gain, "audio.playback_gain");
+    config->tts.volume_gain =
+        ClampGainWithWarning(config->tts.volume_gain, "tts.volume_gain");
+    const float combined_gain = config->audio.playback_gain * config->tts.volume_gain;
+    if (combined_gain > kRecommendedCombinedGainMax) {
+      LogWarn(logevent::kSystemBoot, LogContext{"AppConfig", "", 0, "", ""},
+              {Kv("detail", "combined_gain_high"),
+               Kv("audio.playback_gain", config->audio.playback_gain),
+               Kv("tts.volume_gain", config->tts.volume_gain),
+               Kv("combined_gain", combined_gain),
+               Kv("recommended_max", kRecommendedCombinedGainMax)});
+    }
 
     if (j.contains("nlu") && j.at("nlu").is_object()) {
       const auto& nlu = j.at("nlu");

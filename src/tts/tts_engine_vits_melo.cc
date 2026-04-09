@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,45 +24,13 @@ namespace {
 
 #ifdef MOS_VIS_HAS_SHERPA_ONNX
 
-std::string FindFirstExistingFile(const std::filesystem::path& dir,
-                                  const std::vector<std::string>& candidates) {
-  for (const auto& name : candidates) {
-    const auto p = (dir / name).lexically_normal();
-    if (std::filesystem::exists(p)) {
-      return p.string();
-    }
-  }
-  return "";
-}
-
-std::string NormalizeEngineName(const std::string& name) {
-  std::string normalized = name;
-  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return normalized;
-}
-
-bool IsSherpaEngineName(const std::string& name) {
-  const std::string normalized = NormalizeEngineName(name);
-  return normalized == "sherpa";
-}
-
-bool IsVitsMeloEngineName(const std::string& name) {
-  const std::string normalized = NormalizeEngineName(name);
-  return normalized == "vits_melo";
-}
-
-class SherpaTtsEngine final : public TtsEngine {
+class VitsMeloTtsEngine final : public TtsEngine {
  public:
-  SherpaTtsEngine() = default;
+  VitsMeloTtsEngine() = default;
 
-  ~SherpaTtsEngine() override {
+  ~VitsMeloTtsEngine() override {
     if (playback_ != nullptr) {
       playback_->Stop();
-    }
-    if (reference_wave_ != nullptr) {
-      SherpaOnnxFreeWave(reference_wave_);
-      reference_wave_ = nullptr;
     }
     if (tts_ != nullptr) {
       SherpaOnnxDestroyOfflineTts(tts_);
@@ -76,37 +45,45 @@ class SherpaTtsEngine final : public TtsEngine {
       return Status::NotFound("TTS model_dir not found: " + config.model_dir);
     }
 
-    const std::string lm_flow =
-        FindFirstExistingFile(model_dir, {"lm_flow.int8.onnx", "lm_flow.onnx"});
-    const std::string lm_main =
-        FindFirstExistingFile(model_dir, {"lm_main.int8.onnx", "lm_main.onnx"});
-    const std::string encoder =
-        FindFirstExistingFile(model_dir, {"encoder.int8.onnx", "encoder.onnx"});
-    const std::string decoder =
-        FindFirstExistingFile(model_dir, {"decoder.int8.onnx", "decoder.onnx"});
-    const std::string text_conditioner =
-        FindFirstExistingFile(model_dir, {"text_conditioner.int8.onnx", "text_conditioner.onnx"});
-    const std::string vocab_json = FindFirstExistingFile(model_dir, {"vocab.json"});
-    const std::string token_scores_json = FindFirstExistingFile(model_dir, {"token_scores.json"});
+    const std::filesystem::path model_fp_path = (model_dir / "model.onnx");
+    const std::filesystem::path model_int8_path = (model_dir / "model.int8.onnx");
+    const std::string model_fp = model_fp_path.string();
+    const std::string model_int8 = model_int8_path.string();
+    const std::string tokens = (model_dir / "tokens.txt").string();
+    const std::string lexicon = (model_dir / "lexicon.txt").string();
+    const std::string data_dir = (model_dir / "dict").string();
+    const std::filesystem::path vits_phontab_path =
+        std::filesystem::path(data_dir) / "phontab";
 
-    if (lm_flow.empty() || lm_main.empty() || encoder.empty() || decoder.empty() ||
-        text_conditioner.empty() || vocab_json.empty()) {
+    const bool has_fp = std::filesystem::exists(model_fp);
+    const bool has_int8 = std::filesystem::exists(model_int8);
+    std::error_code file_size_ec;
+    const std::uintmax_t int8_size =
+        has_int8 ? std::filesystem::file_size(model_int8_path, file_size_ec) : 0U;
+    const bool int8_looks_valid =
+        has_int8 && !file_size_ec && int8_size >= 4096U;
+    const std::string model = (config.use_int8 && int8_looks_valid)
+                                  ? model_int8
+                                  : (has_fp ? model_fp : model_int8);
+    const bool has_vits_data_dir = std::filesystem::exists(vits_phontab_path);
+
+    if (!std::filesystem::exists(model) ||
+        !std::filesystem::exists(tokens) ||
+        !std::filesystem::exists(lexicon)) {
       return Status::NotFound(
-          "Pocket TTS model files missing. Need lm_flow/lm_main/encoder/decoder/text_conditioner/vocab.json in " +
+          "TTS model files missing. Need model/tokens/lexicon in " +
           config.model_dir);
     }
 
     SherpaOnnxOfflineTtsConfig cfg;
     std::memset(&cfg, 0, sizeof(cfg));
-    cfg.model.pocket.lm_flow = lm_flow.c_str();
-    cfg.model.pocket.lm_main = lm_main.c_str();
-    cfg.model.pocket.encoder = encoder.c_str();
-    cfg.model.pocket.decoder = decoder.c_str();
-    cfg.model.pocket.text_conditioner = text_conditioner.c_str();
-    cfg.model.pocket.vocab_json = vocab_json.c_str();
-    cfg.model.pocket.token_scores_json =
-        token_scores_json.empty() ? nullptr : token_scores_json.c_str();
-    cfg.model.pocket.voice_embedding_cache_capacity = 32;
+    cfg.model.vits.model = model.c_str();
+    cfg.model.vits.lexicon = lexicon.c_str();
+    cfg.model.vits.tokens = tokens.c_str();
+    cfg.model.vits.data_dir = has_vits_data_dir ? data_dir.c_str() : nullptr;
+    cfg.model.vits.noise_scale = 0.667F;
+    cfg.model.vits.noise_scale_w = 0.8F;
+    cfg.model.vits.length_scale = 1.0F;
     cfg.model.num_threads = config_.num_threads;
     cfg.model.debug = 0;
     cfg.model.provider = config_.provider.c_str();
@@ -117,24 +94,6 @@ class SherpaTtsEngine final : public TtsEngine {
     if (tts_ == nullptr) {
       return Status::Internal("SherpaOnnxCreateOfflineTts failed");
     }
-
-    std::string reference_wav_path = config_.reference_wav;
-    if (reference_wav_path.empty()) {
-      reference_wav_path = FindFirstExistingFile(
-          model_dir,
-          {"test_wavs/loona.wav", "test_wavs/bria.wav",
-           "test_wavs/sample_fr_hibiki_crepes.wav"});
-    }
-    if (reference_wav_path.empty()) {
-      return Status::NotFound(
-          "Pocket TTS needs reference_wav. Set tts.engines.sherpa.reference_wav");
-    }
-    reference_wave_ = SherpaOnnxReadWave(reference_wav_path.c_str());
-    if (reference_wave_ == nullptr || reference_wave_->sample_rate <= 0 ||
-        reference_wave_->num_samples <= 0 || reference_wave_->samples == nullptr) {
-      return Status::Internal("Failed to load valid sherpa reference wav: " + reference_wav_path);
-    }
-    reference_wav_path_ = reference_wav_path;
 
     playback_ = CreateAudioPlayback();
     Status playback_st = playback_->Initialize(audio_config);
@@ -148,12 +107,11 @@ class SherpaTtsEngine final : public TtsEngine {
 
     LogInfo(logevent::kSystemBoot, LogContext{"TtsEngine", "", 0, "", ""},
             {Kv("detail", "tts_initialized"),
-             Kv("engine", "SherpaTtsEngine"),
-             Kv("model_dir", BasenamePath(config.model_dir)),
-             Kv("lm_flow", BasenamePath(lm_flow)),
-             Kv("lm_main", BasenamePath(lm_main)),
-             Kv("decoder", BasenamePath(decoder)),
-             Kv("reference_wav", BasenamePath(reference_wav_path_)),
+             Kv("engine", "VitsMeloTtsEngine"),
+             Kv("model", BasenamePath(model)),
+             Kv("use_int8", (model == model_int8) ? 1 : 0),
+             Kv("int8_size", static_cast<unsigned long long>(int8_size)),
+             Kv("data_dir", has_vits_data_dir ? BasenamePath(data_dir) : "<none>"),
              Kv("volume_gain", config_.volume_gain)});
     return Status::Ok();
   }
@@ -290,13 +248,7 @@ class SherpaTtsEngine final : public TtsEngine {
     std::memset(&gen_cfg, 0, sizeof(gen_cfg));
     gen_cfg.sid = 0;
     gen_cfg.speed = 1.0F;
-    gen_cfg.silence_scale = config_.silence_scale;
-    if (reference_wave_ != nullptr) {
-      gen_cfg.reference_audio = reference_wave_->samples;
-      gen_cfg.reference_audio_len = reference_wave_->num_samples;
-      gen_cfg.reference_sample_rate = reference_wave_->sample_rate;
-      gen_cfg.reference_text = config_.reference_text.empty() ? nullptr : config_.reference_text.c_str();
-    }
+    gen_cfg.silence_scale = 0.2F;
 
     const SherpaOnnxGeneratedAudio* audio =
         SherpaOnnxOfflineTtsGenerateWithConfig(
@@ -329,64 +281,13 @@ class SherpaTtsEngine final : public TtsEngine {
 
   TtsConfig config_;
   const SherpaOnnxOfflineTts* tts_ = nullptr;
-  const SherpaOnnxWave* reference_wave_ = nullptr;
-  std::string reference_wav_path_;
   std::unique_ptr<AudioPlayback> playback_;
   std::unordered_map<std::string, CachedAudio> fixed_phrase_cache_;
 };
 
-class AutoTtsEngine final : public TtsEngine {
- public:
-  Status Initialize(const TtsConfig& config, const AudioConfig& audio_config) override {
-    const std::string requested_engine = config.engine;
-    if (IsSherpaEngineName(requested_engine)) {
-      impl_ = std::make_unique<SherpaTtsEngine>();
-      return impl_->Initialize(config, audio_config);
-    }
-    if (IsVitsMeloEngineName(requested_engine)) {
-      impl_ = CreateVitsMeloTtsEngine();
-      return impl_->Initialize(config, audio_config);
-    }
-    return Status::InvalidArgument(
-        "unsupported tts.engine: " + requested_engine +
-        " (supported: sherpa, vits_melo)");
-  }
-
-  Status Speak(const std::string& text) override {
-    if (impl_ == nullptr) {
-      return Status::Internal("TTS not initialized");
-    }
-    return impl_->Speak(text);
-  }
-
-  Status PlayFile(const std::string& path) override {
-    if (impl_ == nullptr) {
-      return Status::Internal("TTS not initialized");
-    }
-    return impl_->PlayFile(path);
-  }
-
-  Status PlayTone(int frequency_hz, int duration_ms, float amplitude) override {
-    if (impl_ == nullptr) {
-      return Status::Internal("TTS not initialized");
-    }
-    return impl_->PlayTone(frequency_hz, duration_ms, amplitude);
-  }
-
-  Status PreloadFixedPhrases(const std::vector<std::string>& texts) override {
-    if (impl_ == nullptr) {
-      return Status::Internal("TTS not initialized");
-    }
-    return impl_->PreloadFixedPhrases(texts);
-  }
-
- private:
-  std::unique_ptr<TtsEngine> impl_;
-};
-
 #else
 
-class SherpaTtsEngine final : public TtsEngine {
+class VitsMeloTtsEngine final : public TtsEngine {
  public:
   Status Initialize(const TtsConfig&, const AudioConfig&) override {
     return Status::Internal("Sherpa-ONNX runtime not enabled");
@@ -406,12 +307,8 @@ class SherpaTtsEngine final : public TtsEngine {
 
 }  // namespace
 
-std::unique_ptr<TtsEngine> CreateTtsEngine() {
-#ifdef MOS_VIS_HAS_SHERPA_ONNX
-  return std::make_unique<AutoTtsEngine>();
-#else
-  return std::make_unique<SherpaTtsEngine>();
-#endif
+std::unique_ptr<TtsEngine> CreateVitsMeloTtsEngine() {
+  return std::make_unique<VitsMeloTtsEngine>();
 }
 
 }  // namespace mos::vis

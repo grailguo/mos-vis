@@ -4,6 +4,8 @@
     "channels": 1,
     "capture_chunk_samples": 320,
     "ring_seconds": 10,
+    "playback_gain": 1.8,
+    "_comment_playback_gain": "Range: 0.1~4.0, recommended: 1.0~2.2",
     "input_device": "AIUI-USB-MC",
     "output_device": "rockchip-es8388",
     "channel_select_mode": "auto_track",
@@ -45,9 +47,32 @@
   },
   "tts": {
     "enabled": true,
-    "model_dir": "./models/vits-melo-tts-zh_en",
-    "use_int8": true,
-    "fixed_phrase_cache": true
+    "engine": "vits_melo",
+    "_comment_engine": "可选: sherpa | vits_melo",
+    "common": {
+      "fixed_phrase_cache": true,
+      "volume_gain": 1.8
+    },
+    "engines": {
+      "sherpa": {
+        "model_dir": "./models/sherpa-onnx-pocket-tts-int8-2026-01-26",
+        "reference_wav": "./models/sherpa-onnx-pocket-tts-int8-2026-01-26/test_wavs/loona.wav",
+        "reference_text": "Loonah",
+        "provider": "cpu",
+        "num_threads": 1,
+        "max_num_sentences": 2,
+        "silence_scale": 0.2
+      },
+      "vits_melo": {
+        "model_dir": "./models/vits-melo-tts-zh_en",
+        "use_int8": true,
+        "provider": "cpu",
+        "num_threads": 1,
+        "max_num_sentences": 2,
+        "silence_scale": 0.2
+      }
+    },
+    "_comment_volume_gain": "Range: 0.1~4.0, recommended: 1.0~1.8, recommended combined gain(playback*tts)<=3.0"
   },
   "nlu": {
     "enabled": true,

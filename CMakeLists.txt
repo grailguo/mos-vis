@@ -27,6 +27,7 @@ add_library(mos_vis_lib
   src/asr/asr_engine_sherpa.cc
   src/kws/kws_engine_sherpa.cc
   src/tts/tts_engine_sherpa.cc
+  src/tts/tts_engine_vits_melo.cc
   src/nlu/nlu_engine_simple.cc
   src/runtime/session_controller.cc
   src/runtime/pipeline_scheduler.cc

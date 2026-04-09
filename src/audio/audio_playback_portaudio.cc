@@ -1,6 +1,7 @@
 #include "mos/vis/audio/audio_playback.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <cerrno>
@@ -79,6 +80,8 @@ class PortAudioPlayback final : public AudioPlayback {
       return st;
     }
     TryBoostPlaybackThreadPriority();
+    const float gain = OutputGain();
+    const bool unity_gain = std::abs(gain - 1.0F) < 1e-4F;
 
     const std::size_t max_frames_per_write = 1024U;
     std::size_t offset = 0U;
@@ -86,12 +89,22 @@ class PortAudioPlayback final : public AudioPlayback {
       const std::size_t frames = std::min(max_frames_per_write, count - offset);
       PaError err = paNoError;
       if (sample_format_ == paFloat32 && output_channels_ == 1) {
-        err = Pa_WriteStream(stream_, samples + offset, static_cast<unsigned long>(frames));
+        if (unity_gain) {
+          err = Pa_WriteStream(stream_, samples + offset, static_cast<unsigned long>(frames));
+        } else {
+          std::vector<float> mono;
+          mono.resize(frames, 0.0F);
+          for (std::size_t i = 0; i < frames; ++i) {
+            mono[i] = ClampSample(samples[offset + i] * gain);
+          }
+          err = Pa_WriteStream(stream_, mono.data(), static_cast<unsigned long>(frames));
+        }
       } else if (sample_format_ == paFloat32 && output_channels_ == 2) {
         std::vector<float> stereo;
         stereo.resize(frames * 2U, 0.0F);
         for (std::size_t i = 0; i < frames; ++i) {
-          const float s = samples[offset + i];
+          const float s = unity_gain ? samples[offset + i]
+                                     : ClampSample(samples[offset + i] * gain);
           stereo[i * 2U] = s;
           stereo[i * 2U + 1U] = s;
         }
@@ -100,7 +113,8 @@ class PortAudioPlayback final : public AudioPlayback {
         std::vector<std::int16_t> mono16;
         mono16.resize(frames, 0);
         for (std::size_t i = 0; i < frames; ++i) {
-          const float s = std::max(-1.0F, std::min(1.0F, samples[offset + i]));
+          const float s = unity_gain ? ClampSample(samples[offset + i])
+                                     : ClampSample(samples[offset + i] * gain);
           mono16[i] = static_cast<std::int16_t>(s * 32767.0F);
         }
         err = Pa_WriteStream(stream_, mono16.data(), static_cast<unsigned long>(frames));
@@ -108,7 +122,8 @@ class PortAudioPlayback final : public AudioPlayback {
         std::vector<std::int16_t> stereo16;
         stereo16.resize(frames * 2U, 0);
         for (std::size_t i = 0; i < frames; ++i) {
-          const float s = std::max(-1.0F, std::min(1.0F, samples[offset + i]));
+          const float s = unity_gain ? ClampSample(samples[offset + i])
+                                     : ClampSample(samples[offset + i] * gain);
           const std::int16_t v = static_cast<std::int16_t>(s * 32767.0F);
           stereo16[i * 2U] = v;
           stereo16[i * 2U + 1U] = v;
@@ -441,6 +456,14 @@ class PortAudioPlayback final : public AudioPlayback {
              {Kv("detail", "playback_thread_priority_boost_failed"),
               Kv("errno", errno)});
 #endif
+  }
+
+  float OutputGain() const {
+    return std::max(0.1F, std::min(4.0F, config_.playback_gain));
+  }
+
+  static float ClampSample(float v) {
+    return std::max(-1.0F, std::min(1.0F, v));
   }
 
   AudioConfig config_;
