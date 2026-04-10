@@ -5,6 +5,7 @@
 #include <string>
 
 #include "mos/vis/common/logging.h"
+#include "mos/vis/runtime/vis_event.h"
 
 namespace mos::vis {
 
@@ -57,8 +58,15 @@ bool ExecutingStage::CanProcess(SessionState state) const {
 Status ExecutingStage::Process(SessionContext& context) {
   auto& nlu_control = context.nlu_control_state;
   if (!nlu_control.has_pending_nlu_result) {
-    // No NLU result pending; transition to idle
-    context.state = SessionState::kIdle;
+    // No NLU result pending; queue error event to transition to idle
+    if (context.state_machine) {
+      VisEvent event(VisEventType::kTtsPlaybackFailed);
+      event.source_stage = "ExecutingStage";
+      context.state_machine->QueueEvent(event);
+    } else {
+      // Fallback for v2 mode
+      context.state = SessionState::kIdle;
+    }
     LogInfo(logevent::kSessionEnd, MakeLogCtx(context), {Kv("reason", "no_pending_nlu_result")});
     return Status::Ok();
   }
@@ -96,19 +104,36 @@ Status ExecutingStage::Process(SessionContext& context) {
             {Kv("detail", "control_execute_skipped"), Kv("intent", intent)});
   }
 
+  // If control was executed, clear pending NLU result regardless of reply_text
+  if (should_execute_control && context.control != nullptr) {
+    nlu_control.has_pending_nlu_result = false;
+    nlu_control.pending_nlu_result.reset();
+    nlu_control.pending_control_text.clear();
+  }
+
   // Schedule TTS reply if we have one
   if (!reply_text.empty()) {
     if (intent == "device.control.stop_analysis") {
       context.keep_session_open = false;
     }
-    context.reply_tts_started = false;
-    ++context.reply_playback_token;
-    context.tts_state.tasks.push_back(TtsTask{"", reply_text});
+    if (!context.state_machine) {
+      // v2 mode: schedule TTS task directly
+      context.reply_tts_started = false;
+      ++context.reply_playback_token;
+      context.tts_state.tasks.push_back(TtsTask{"", reply_text});
+      nlu_control.has_pending_nlu_result = false;
+      nlu_control.pending_nlu_result.reset();
+      nlu_control.pending_control_text.clear();
+      // Remain in executing state? The original returns early.
+      // The pipeline scheduler will call TtsStage later.
+      return Status::Ok();
+    }
+    // v3 mode: TTS task will be scheduled by state machine action handler
+    // (event.text contains reply_text)
+    // Clear pending NLU result now (already cleared for control execution)
     nlu_control.has_pending_nlu_result = false;
     nlu_control.pending_nlu_result.reset();
     nlu_control.pending_control_text.clear();
-    // Remain in executing state? The original returns early.
-    // The pipeline scheduler will call TtsStage later.
     return Status::Ok();
   }
 
@@ -117,10 +142,18 @@ Status ExecutingStage::Process(SessionContext& context) {
     nlu_control.has_pending_nlu_result = false;
     nlu_control.pending_nlu_result.reset();
     nlu_control.pending_control_text.clear();
-    context.state = SessionState::kPreListening;
-    LogInfo(logevent::kStateTransition, MakeLogCtx(context),
-            {Kv("layer", "main"), Kv("from", "executing"), Kv("to", "pre_listening"), Kv("reason", "unknown_intent")});
-    return Status::Ok();
+    if (context.state_machine) {
+      // State machine already transitioned to kSpeaking via kIntentUnknown event
+      LogInfo(logevent::kStateTransition, MakeLogCtx(context),
+              {Kv("layer", "main"), Kv("detail", "unknown_intent_cleared")});
+      return Status::Ok();
+    } else {
+      // v2 mode: transition to pre_listening
+      context.state = SessionState::kPreListening;
+      LogInfo(logevent::kStateTransition, MakeLogCtx(context),
+              {Kv("layer", "main"), Kv("from", "executing"), Kv("to", "pre_listening"), Kv("reason", "unknown_intent")});
+      return Status::Ok();
+    }
   }
 
   // Known intent but no reply text and no control execution?
@@ -128,7 +161,14 @@ Status ExecutingStage::Process(SessionContext& context) {
   nlu_control.has_pending_nlu_result = false;
   nlu_control.pending_nlu_result.reset();
   nlu_control.pending_control_text.clear();
-  context.state = SessionState::kIdle;
+  if (context.state_machine) {
+    // Queue failure event to transition to idle via global transition
+    VisEvent event(VisEventType::kTtsPlaybackFailed);
+    event.source_stage = "ExecutingStage";
+    context.state_machine->QueueEvent(event);
+  } else {
+    context.state = SessionState::kIdle;
+  }
   LogInfo(logevent::kSessionEnd, MakeLogCtx(context),
           {Kv("reason", "known_intent_no_reply")});
   return Status::Ok();
@@ -151,6 +191,14 @@ Status ExecutingStage::ExecuteControl(SessionContext& context,
     LogError(logevent::kControlTimeout, MakeLogCtx(context),
              {Kv("detail", "control_execute_failed"), Kv("err", st.message())});
     reply_text = "控制请求失败：" + st.message();
+    // Queue failure event for state machine
+    if (context.state_machine) {
+      VisEvent event(VisEventType::kControlSyncAckFail);
+      event.request_id = ""; // no request id yet
+      event.source_stage = "ExecutingStage";
+      event.text = reply_text;
+      context.state_machine->QueueEvent(event);
+    }
     return st;
   }
   LogInfo(logevent::kControlAck, MakeLogCtx(context),
@@ -159,6 +207,14 @@ Status ExecutingStage::ExecuteControl(SessionContext& context,
            Kv("ack_ms", timer.ElapsedMs())});
   context.current_control_request_id = control_result.request_id;
   reply_text = control_result.reply_text;
+  // Queue success event for state machine
+  if (context.state_machine) {
+    VisEvent event(VisEventType::kControlSyncAckSuccess);
+    event.request_id = control_result.request_id;
+    event.source_stage = "ExecutingStage";
+    event.text = reply_text;
+    context.state_machine->QueueEvent(event);
+  }
   // If intent was known but not handled, treat as unknown (handled by caller)
   // This logic is in the original but we rely on caller's is_unknown_intent flag.
   return Status::Ok();

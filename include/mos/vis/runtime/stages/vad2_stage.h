@@ -56,10 +56,6 @@ class Vad2Stage : public PipelineStage {
   // Temporary buffer for VAD processing
   std::vector<float> vad_window_buffer_;
 
-  // Track no-speech timeout while session is armed (pre-listening).
-  std::optional<std::chrono::steady_clock::time_point> pre_listening_since_;
-  SessionState last_observed_state_ = SessionState::kIdle;
-  int pre_listening_idle_timeout_sec_ = 15;
 };
 
 }  // namespace mos::vis

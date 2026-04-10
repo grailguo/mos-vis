@@ -8,6 +8,7 @@
 #include "mos/vis/nlu/nlu_engine.h"
 #include "mos/vis/control/control_engine.h"
 #include "mos/vis/tts/tts_engine.h"
+#include "mos/vis/runtime/state_machine_controller.h"
 
 namespace mos::vis {
 
@@ -26,6 +27,11 @@ std::vector<std::string> CollectWakeAckTexts(const AppConfig& config) {
   std::vector<std::string> texts;
   texts.reserve(config.wake_ack_text.size());
   for (const auto& rule : config.wake_ack_text) {
+    // If preset_file is configured, wake ACK should play that file directly.
+    // Skip text preload to avoid unnecessary TTS generation.
+    if (!rule.preset_file.empty()) {
+      continue;
+    }
     if (!rule.reply_text.empty()) {
       texts.push_back(rule.reply_text);
     }
@@ -138,6 +144,9 @@ Status SessionController::Initialize() {
     }
   }
 
+  // Initialize state machine controller (v3 architecture)
+  context_.state_machine = std::make_unique<StateMachineController>(context_);
+
   // Share engine instances with the pipeline stages via SessionContext
   context_.vad1 = vad1_;
   context_.vad2 = vad2_;
@@ -177,6 +186,11 @@ void SessionController::Tick() {
   if (!st.ok()) {
     LogError(logevent::kSessionEnd, MakeLogCtx(context_, "SessionController"),
              {Kv("result", "pipeline_tick_failed"), Kv("err", st.message())});
+  }
+
+  // Process state machine events (v3 architecture)
+  if (context_.state_machine) {
+    context_.state_machine->Tick();
   }
 }
 

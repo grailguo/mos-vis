@@ -31,12 +31,12 @@
   "vad2": {
     "enabled": true,
     "model_path": "./models/silero-vad-v4-rk3588/silero-vad-v4-rk3588.rknn",
-    "threshold": 0.42,
+    "threshold": 0.30,
     "window_samples": 512,
     "hop_samples": 160,
-    "start_frames": 2,
-    "end_frames": 20,
-    "hangover_ms": 320
+    "start_frames": 6,
+    "end_frames": 30,
+    "hangover_ms": 500
   },
   "asr": {
     "enabled": true,
@@ -128,28 +128,28 @@
       "keywords": [
         "0801"
       ],
-      "preset_file": "",
+      "preset_file": "./assets/presets/wake_ack_0801.wav",
       "reply_text": "收到，请说。"
     },
     {
       "keywords": [
         "0803"
       ],
-      "preset_file": "",
+      "preset_file": "./assets/presets/wake_ack_0803.wav",
       "reply_text": "我在，请指示。"
     },
     {
       "keywords": [
         "小G"
       ],
-      "preset_file": "",
+      "preset_file": "./assets/presets/wake_ack_xiaog.wav",
       "reply_text": "在呢，请继续。"
     },
     {
       "keywords": [
         "小莫"
       ],
-      "preset_file": "",
+      "preset_file": "./assets/presets/wake_ack_xiaomo.wav",
       "reply_text": "我在，请讲。"
     }
   ]

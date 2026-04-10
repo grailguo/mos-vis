@@ -21,7 +21,7 @@ struct AudioConfig {
 struct VadConfig {
   bool enabled = true;
   std::string model_path;
-  float threshold = 0.50F;
+  float threshold = 0.20F;
   int window_samples = 512;
   int hop_samples = 160;
   int open_frames = 2;

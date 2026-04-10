@@ -13,6 +13,8 @@
 #include "mos/vis/nlu/nlu_engine.h"
 #include "mos/vis/runtime/subsm/hotspot_subsms.h"
 #include "mos/vis/runtime/session_state.h"
+// StateMachineController for v3 architecture
+#include "mos/vis/runtime/state_machine_controller.h"
 
 // Forward declarations for engine interfaces
 namespace mos::vis {
@@ -117,6 +119,8 @@ struct SessionContext {
     float ema_alpha = 0.35F;
     float start_threshold = 0.50F;
     float end_threshold = 0.25F;
+    std::chrono::steady_clock::time_point speech_start_time;
+    int min_speech_duration_ms = 500;  // Minimum speech duration to consider valid
   } vad2_state;
 
   // === KWS State ===
@@ -143,6 +147,7 @@ struct SessionContext {
     std::chrono::steady_clock::time_point last_text_update_time;
     int no_text_timeout_seconds = 15;
     bool has_pending_final_result = false;
+    bool should_finalize = false;  // Flag set by state machine to trigger ASR finalization
     // Note: pending_asr_final_result_ and pending_nlu_result_ are stored separately
   } asr_state;
 
@@ -155,6 +160,9 @@ struct SessionContext {
 
   // === Local event bus for Layer-2 hotspot sub-state machines ===
   subsm::LocalEventBus local_events;
+
+  // === V3 State Machine Controller ===
+  std::unique_ptr<StateMachineController> state_machine;
 
   struct SubsmState {
     subsm::WakeState wake = subsm::WakeState::kWaitingWakeup;

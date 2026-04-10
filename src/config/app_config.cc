@@ -267,7 +267,7 @@ Status AppConfig::LoadFromFile(const std::string& path, AppConfig* config) {
     if (j.contains("wake_ack_text") && j.at("wake_ack_text").is_array()) {
       for (const auto& item : j.at("wake_ack_text")) {
         WakeAckRule rule;
-        rule.preset_file = item.value("preset_file", "");
+        rule.preset_file = ResolvePathFromConfigDir(config_dir, item.value("preset_file", ""));
         rule.reply_text = item.value("reply_text", "");
         if (item.contains("keywords") && item.at("keywords").is_array()) {
           for (const auto& kw : item.at("keywords")) {

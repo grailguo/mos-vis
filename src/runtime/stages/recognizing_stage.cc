@@ -5,6 +5,7 @@
 #include <string>
 
 #include "mos/vis/common/logging.h"
+#include "mos/vis/runtime/vis_event.h"
 
 namespace mos::vis {
 
@@ -57,9 +58,12 @@ Status RecognizingStage::Process(SessionContext& context) {
     LogWarn(logevent::kAsrFinalEmpty, MakeLogCtx(context), {Kv("detail", "skip_recognizing")});
     nlu_control.has_pending_asr_final_result = false;
     nlu_control.pending_asr_final_result.reset();
-    context.state = SessionState::kPreListening;
-    LogInfo(logevent::kStateTransition, MakeLogCtx(context),
-            {Kv("layer", "main"), Kv("from", "recognizing"), Kv("to", "pre_listening"), Kv("reason", "empty_text")});
+    // Queue empty text event for state machine
+    if (context.state_machine) {
+      VisEvent event(VisEventType::kAsrEndpointWithEmptyText);
+      event.source_stage = "RecognizingStage";
+      context.state_machine->QueueEvent(event);
+    }
     return Status::Ok();
   }
 
@@ -70,6 +74,7 @@ Status RecognizingStage::Process(SessionContext& context) {
   nlu_control.has_pending_nlu_result = false;
   nlu_control.pending_control_text = final_text;
 
+  VisEventType intent_event_type = VisEventType::kIntentUnknown;
   if (context.nlu != nullptr) {
     Status st = context.nlu->Reset();
     if (!st.ok()) {
@@ -86,14 +91,26 @@ Status RecognizingStage::Process(SessionContext& context) {
       if (nlu_result.intent.rfind("device.control.", 0) == 0) {
         LogInfo(logevent::kIntentRoute, MakeLogCtx(context),
                 {Kv("detail", "matched_control_intent"), Kv("intent", nlu_result.intent)});
+        intent_event_type = VisEventType::kIntentControl;
+      } else if (nlu_result.intent == "unknown") {
+        intent_event_type = VisEventType::kIntentUnknown;
+      } else {
+        // Default to unknown for any other intent
+        intent_event_type = VisEventType::kIntentUnknown;
       }
       nlu_control.pending_nlu_result = std::move(nlu_result);
       nlu_control.has_pending_nlu_result = true;
     }
   }
 
-  // Transition to executing state
-  context.state = SessionState::kExecuting;
+  // Queue intent event for state machine
+  if (context.state_machine) {
+    VisEvent event(intent_event_type);
+    event.source_stage = "RecognizingStage";
+    context.state_machine->QueueEvent(event);
+  }
+
+  // Clear pending ASR result (state machine will transition)
   nlu_control.has_pending_asr_final_result = false;
   nlu_control.pending_asr_final_result.reset();
 

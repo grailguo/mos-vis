@@ -2,6 +2,8 @@
 
 #include "mos/vis/common/logging.h"
 #include "mos/vis/runtime/subsm/hotspot_subsms.h"
+#include "mos/vis/runtime/vis_event.h"
+#include "mos/vis/runtime/session_state.h"
 
 namespace mos::vis {
 
@@ -58,7 +60,8 @@ Status TtsStage::Process(SessionContext& context) {
   tts_state.task_running = true;
   context.reply_tts_started = true;
   ++context.reply_playback_token;
-  context.state = SessionState::kSpeaking;
+  // State should already be kSpeaking (for reply) or kAckSpeaking (for wake ack)
+  // via state machine transitions; do not assign directly.
 
   Status st = StartTask(context, task);
   if (!st.ok()) {
@@ -110,39 +113,68 @@ void TtsStage::ConsumeReplyEvents(SessionContext& context) {
 
     context.subsm_state.reply = decision.next_state;
 
-    switch (decision.action) {
-      case subsm::ReplyAction::kRearmCommandWait:
-        context.state = SessionState::kPreListening;
-        context.reply_tts_started = false;
-        ++context.turn_id;
-        LogInfo(logevent::kStateTransition, MakeLogCtx(context),
-                {Kv("layer", "main"),
-                 Kv("from", "speaking"),
-                 Kv("to", "pre_listening"),
-                 Kv("reason", "tts_done_keep_session")});
+    // Map sub-state machine event to VisEvent for main state machine
+    VisEventType vis_type = VisEventType::kTtsPlaybackCompleted; // default
+    switch (event) {
+      case subsm::ReplyEvent::kTtsPlaybackCompleted:
+        vis_type = VisEventType::kTtsPlaybackCompleted;
         break;
-      case subsm::ReplyAction::kEndSessionToIdle:
-        context.state = SessionState::kIdle;
-        context.reply_tts_started = false;
-        LogInfo(logevent::kSessionEnd, MakeLogCtx(context),
-                {Kv("reason", "tts_done_close_session")});
+      case subsm::ReplyEvent::kTtsPlaybackFailed:
+        vis_type = VisEventType::kTtsPlaybackFailed;
         break;
-      case subsm::ReplyAction::kStartAsrByBargeIn:
-        // Current TTS engine has no hard-stop API; switch to listening path and clear queued reply.
-        context.tts_state.tasks.clear();
-        context.state = SessionState::kListening;
-        context.reply_tts_started = false;
-        if (context.asr != nullptr && context.config.asr.enabled) {
-          Status st = context.asr->Reset();
-          if (!st.ok()) {
-            GetLogger()->warn("{}: ASR reset failed on barge-in: {}", kLogTag, st.message());
-          }
-        }
-        LogWarn(logevent::kTtsBargeIn, MakeLogCtx(context), {Kv("detail", "switch_to_listening")});
+      case subsm::ReplyEvent::kUserBargeIn:
+        vis_type = VisEventType::kUserBargeIn;
         break;
-      case subsm::ReplyAction::kNoop:
       default:
-        break;
+        // Unknown event, ignore
+        continue;
+    }
+
+    // Queue event to main state machine if available
+    if (context.state_machine) {
+      VisEvent vis_event(vis_type);
+      vis_event.source_stage = "TtsStage";
+      context.state_machine->QueueEvent(vis_event);
+      // Log that we queued event
+      LogDebug(logevent::kSubsmTransition, MakeLogCtx(context),
+               {Kv("detail", "queued_vis_event"),
+                Kv("vis_type", static_cast<int>(vis_type))});
+    } else {
+      // Fallback to original v2 state assignments
+      switch (decision.action) {
+        case subsm::ReplyAction::kRearmCommandWait:
+          context.state = SessionState::kPreListening;
+          context.reply_tts_started = false;
+          ++context.turn_id;
+          LogInfo(logevent::kStateTransition, MakeLogCtx(context),
+                  {Kv("layer", "main"),
+                   Kv("from", "speaking"),
+                   Kv("to", "pre_listening"),
+                   Kv("reason", "tts_done_keep_session")});
+          break;
+        case subsm::ReplyAction::kEndSessionToIdle:
+          context.state = SessionState::kIdle;
+          context.reply_tts_started = false;
+          LogInfo(logevent::kSessionEnd, MakeLogCtx(context),
+                  {Kv("reason", "tts_done_close_session")});
+          break;
+        case subsm::ReplyAction::kStartAsrByBargeIn:
+          // Current TTS engine has no hard-stop API; switch to listening path and clear queued reply.
+          context.tts_state.tasks.clear();
+          context.state = SessionState::kListening;
+          context.reply_tts_started = false;
+          if (context.asr != nullptr && context.config.asr.enabled) {
+            Status st = context.asr->Reset();
+            if (!st.ok()) {
+              GetLogger()->warn("{}: ASR reset failed on barge-in: {}", kLogTag, st.message());
+            }
+          }
+          LogWarn(logevent::kTtsBargeIn, MakeLogCtx(context), {Kv("detail", "switch_to_listening")});
+          break;
+        case subsm::ReplyAction::kNoop:
+        default:
+          break;
+      }
     }
   }
 }

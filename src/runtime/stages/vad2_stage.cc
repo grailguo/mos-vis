@@ -6,6 +6,8 @@
 
 #include "mos/vis/common/logging.h"
 #include "mos/vis/runtime/subsm/hotspot_subsms.h"
+#include "mos/vis/runtime/vis_event.h"
+#include "mos/vis/runtime/session_state.h"
 
 namespace mos::vis {
 
@@ -65,7 +67,7 @@ Status Vad2Stage::OnAttach(SessionContext& context) {
   context.vad2_state.hangover_frames = std::max(1, static_cast<int>(
       std::ceil(static_cast<float>(vad_config.hangover_ms) / frame_ms)));
   context.vad2_state.start_threshold = Clamp01(vad_config.threshold);
-  context.vad2_state.end_threshold = Clamp01(std::max(0.01F, vad_config.threshold * 0.5F));
+  context.vad2_state.end_threshold = Clamp01(std::max(0.01F, vad_config.threshold * 0.8F));
 
   // Reset state variables
   context.vad2_state.stage = SessionContext::Vad2MachineStage::kSilence;
@@ -73,13 +75,11 @@ Status Vad2Stage::OnAttach(SessionContext& context) {
   context.vad2_state.end_count = 0;
   context.vad2_state.hangover_left = 0;
   context.vad2_state.prob_ema = 0.0F;
+  context.vad2_state.speech_start_time = std::chrono::steady_clock::now();
 
   // Pre-allocate buffer
   vad_window_buffer_.resize(vad_window_samples_, 0.0F);
 
-  pre_listening_since_.reset();
-  last_observed_state_ = context.state;
-  pre_listening_idle_timeout_sec_ = 15;
 
   // Compute max windows per tick
   const std::size_t nominal_windows_per_tick =
@@ -111,32 +111,6 @@ Status Vad2Stage::Process(SessionContext& context) {
     return Status::Ok();
   }
 
-  const auto now = std::chrono::steady_clock::now();
-  if (context.state != last_observed_state_) {
-    if (context.state == SessionState::kPreListening) {
-      pre_listening_since_ = now;
-    } else {
-      pre_listening_since_.reset();
-    }
-    last_observed_state_ = context.state;
-  }
-  if (context.state == SessionState::kPreListening) {
-    if (!pre_listening_since_.has_value()) {
-      pre_listening_since_ = now;
-    }
-    if ((now - *pre_listening_since_) >=
-        std::chrono::seconds(std::max(1, pre_listening_idle_timeout_sec_))) {
-      context.state = SessionState::kIdle;
-      context.reply_tts_started = false;
-      context.current_control_request_id.clear();
-      LogInfo(logevent::kSessionEnd, MakeLogCtx(context),
-              {Kv("reason", "pre_listening_no_speech_timeout_to_idle"),
-               Kv("timeout_sec", pre_listening_idle_timeout_sec_)});
-      pre_listening_since_.reset();
-      last_observed_state_ = context.state;
-      return Status::Ok();
-    }
-  }
 
   std::size_t processed_windows = 0;
   while (processed_windows < max_vad_windows_per_tick_ &&
@@ -177,6 +151,7 @@ bool Vad2Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
       state.start_count = 0;
       state.end_count = 0;
       state.hangover_left = 0;
+      state.speech_start_time = std::chrono::steady_clock::now();
     }
   } else {
     if (state.prob_ema < state.end_threshold) {
@@ -211,6 +186,12 @@ bool Vad2Stage::UpdateStateMachine(SessionContext& context, float vad_probabilit
 void Vad2Stage::OnSpeechStart(SessionContext& context) {
   if (context.state == SessionState::kSpeaking) {
     context.local_events.reply_events.push_back(subsm::ReplyEvent::kUserBargeIn);
+    // Queue user barge-in event to state machine
+    if (context.state_machine) {
+      VisEvent event(VisEventType::kUserBargeIn);
+      event.source_stage = "Vad2Stage";
+      context.state_machine->QueueEvent(event);
+    }
     LogWarn(logevent::kTtsBargeIn, MakeLogCtx(context),
             {Kv("detail", "speech_start_while_speaking")});
     return;
@@ -219,7 +200,16 @@ void Vad2Stage::OnSpeechStart(SessionContext& context) {
   // Only trigger speech start if we are in a state that expects speech
   if (context.state == SessionState::kPreListening ||
       context.state == SessionState::kWakeCandidate) {
-    context.state = SessionState::kListening;
+    // If state machine is present, process command speech detected event.
+    // The state machine will transition to appropriate state (kRecognizingCommand).
+    if (context.state_machine) {
+      VisEvent event(VisEventType::kCommandSpeechDetected);
+      event.source_stage = "Vad2Stage";
+      context.state_machine->ProcessEvent(event);
+    } else {
+      // v2 fallback: direct state assignment
+      context.state = SessionState::kListening;
+    }
     context.asr_state.processed_samples = 0;
 
     // Compute ASR start position with preroll
@@ -252,8 +242,16 @@ void Vad2Stage::OnSpeechStart(SessionContext& context) {
 
 void Vad2Stage::OnSpeechEnd(SessionContext& context) {
   if (context.state == SessionState::kListening) {
-    context.state = SessionState::kFinalizing;
-    GetLogger()->debug("{}: speech end, finalizing ASR", kLogTag);
+    if (context.state_machine) {
+      VisEvent event(VisEventType::kCommandSpeechEnd);
+      event.source_stage = "Vad2Stage";
+      context.state_machine->QueueEvent(event);
+      GetLogger()->debug("{}: speech end, queued kCommandSpeechEnd event", kLogTag);
+    } else {
+      // v2 fallback
+      context.state = SessionState::kFinalizing;
+      GetLogger()->debug("{}: speech end, finalizing ASR", kLogTag);
+    }
   }
 }
 

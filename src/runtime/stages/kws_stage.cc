@@ -8,6 +8,8 @@
 
 #include "mos/vis/common/logging.h"
 #include "mos/vis/runtime/subsm/hotspot_subsms.h"
+#include "mos/vis/runtime/vis_event.h"
+#include "mos/vis/runtime/session_state.h"
 
 namespace mos::vis {
 
@@ -30,6 +32,42 @@ struct ChunkStats {
   float rms = 0.0F;
   float peak = 0.0F;
 };
+
+// Helper to queue KWS matched event to state machine
+void QueueKwsMatchedEvent(SessionContext& context,
+                          const std::string& keyword,
+                          const std::string& detail_json) {
+  // Ensure session_id is set (same logic as in ConsumeWakeEvents)
+  if (context.session_id.empty()) {
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    std::ostringstream ss;
+    ss << "s" << now_ms;
+    context.session_id = ss.str();
+    context.turn_id = 1;
+  }
+
+  // Queue event to state machine if available
+  if (context.state_machine) {
+    VisEvent event(VisEventType::kKwsMatched);
+    event.text = keyword;
+    event.payload = detail_json;
+    event.source_stage = "KwsStage";
+    context.state_machine->QueueEvent(event);
+    LogInfo(logevent::kKwsHit, MakeLogCtx(context),
+            {Kv("keyword", keyword), Kv("cooldown", 0)});
+  } else {
+    // Fallback to legacy HandleKwsHit for backward compatibility
+    // (should not happen in v3 architecture)
+    LogWarn(logevent::kKwsHit, MakeLogCtx(context),
+            {Kv("detail", "no_state_machine_fallback"),
+             Kv("keyword", keyword)});
+    // Call HandleKwsHit (defined later) - forward declaration needed
+    // We'll handle this by not calling this fallback path;
+    // instead ensure state_machine is always present.
+  }
+}
 
 ChunkStats ComputeChunkStats(const std::vector<float>& samples) {
   ChunkStats stats;
@@ -165,7 +203,7 @@ Status KwsStage::Process(SessionContext& context) {
     if (kws_state.pending_hit && !kws_state.fired_in_current_gate) {
       ++context.stats.kws_hit_count;
       kws_state.fired_in_current_gate = true;
-      HandleKwsHit(context, kws_state.pending_keyword, kws_state.pending_json);
+      QueueKwsMatchedEvent(context, kws_state.pending_keyword, kws_state.pending_json);
       kws_state.pending_hit = false;
       kws_state.pending_keyword.clear();
       kws_state.pending_json.clear();
@@ -237,9 +275,29 @@ Status KwsStage::Process(SessionContext& context) {
                          static_cast<int>(context.state));
 
       // Bypass VAD-1 gate: wake immediately on KWS hit while waiting for wakeup.
+      // Also handle secondary wake ACK when already in pre-listening state.
       if (context.state == SessionState::kIdle) {
         context.local_events.wake_events.push_back(subsm::WakeEvent::kKwsMatched);
         ConsumeWakeEvents(context, kws_result.keyword, kws_result.json);
+      } else if (context.state == SessionState::kPreListening ||
+                 (context.state_machine &&
+                  MapV3ToV2State(context.state_machine->current_state()) == SessionState::kPreListening)) {
+        // Secondary wake detection: queue kKwsMatched event for state machine
+        // This handles both v2 kPreListening state and v3 states that map to kPreListening
+        // (e.g., kWaitingCommandSpeech).
+        if (context.state_machine) {
+          VisEvent event(VisEventType::kKwsMatched);
+          event.text = kws_result.keyword;
+          event.payload = kws_result.json;
+          event.source_stage = "KwsStage";
+          context.state_machine->QueueEvent(event);
+          LogInfo(logevent::kKwsHit, MakeLogCtx(context),
+                  {Kv("keyword", kws_result.keyword),
+                   Kv("detail", "secondary_wake_ack")});
+        } else {
+          LogWarn(logevent::kKwsReject, MakeLogCtx(context),
+                  {Kv("detail", "secondary_wake_ignored_no_state_machine")});
+        }
       } else {
         LogDebug(logevent::kKwsReject, MakeLogCtx(context),
                  {Kv("detail", "hit_ignored_not_idle")});
@@ -356,7 +414,7 @@ void KwsStage::ConsumeWakeEvents(SessionContext& context,
         context.kws_state.pending_keyword.clear();
         context.kws_state.pending_json.clear();
         context.kws_state.pending_age_chunks = 0;
-        HandleKwsHit(context, keyword, detail_json);
+        QueueKwsMatchedEvent(context, keyword, detail_json);
         break;
       case subsm::WakeAction::kIgnoreMatched:
         LogInfo(logevent::kKwsHit, MakeLogCtx(context), {Kv("keyword", keyword), Kv("cooldown", 1)});

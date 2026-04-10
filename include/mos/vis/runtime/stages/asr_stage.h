@@ -33,8 +33,6 @@ class AsrStage : public PipelineStage {
   void OnDetach(SessionContext& context) override;
 
  private:
-  // Handle timeout when no new ASR text is received
-  void HandleNoTextTimeout(SessionContext& context);
 
   // Process audio chunks while in listening/finalizing state
   Status ProcessAudioChunks(SessionContext& context);

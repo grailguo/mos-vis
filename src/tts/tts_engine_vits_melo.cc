@@ -137,6 +137,11 @@ class VitsMeloTtsEngine final : public TtsEngine {
       if (!gen_st.ok()) {
         return gen_st;
       }
+      LogInfo(logevent::kSystemBoot, LogContext{"TtsEngine", "", 0, "", ""},
+              {Kv("detail", "generated_audio"),
+               Kv("text", MaskSummary(text, 16)),
+               Kv("sample_rate", generated_audio.sample_rate),
+               Kv("samples", static_cast<unsigned long long>(generated_audio.samples.size()))});
       if (config_.fixed_phrase_cache) {
         fixed_phrase_cache_[text] = generated_audio;
         audio_for_playback = &fixed_phrase_cache_[text];
@@ -224,6 +229,11 @@ class VitsMeloTtsEngine final : public TtsEngine {
                  Kv("err", gen_st.message())});
         continue;
       }
+      LogInfo(logevent::kSystemBoot, LogContext{"TtsEngine", "", 0, "", ""},
+              {Kv("detail", "fixed_phrase_cached"),
+               Kv("text", MaskSummary(text, 16)),
+               Kv("sample_rate", cached.sample_rate),
+               Kv("samples", static_cast<unsigned long long>(cached.samples.size()))});
       fixed_phrase_cache_[text] = std::move(cached);
       ++loaded;
     }

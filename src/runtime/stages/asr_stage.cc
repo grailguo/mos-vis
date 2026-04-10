@@ -10,6 +10,7 @@
 
 #include "mos/vis/common/logging.h"
 #include "mos/vis/runtime/subsm/hotspot_subsms.h"
+#include "mos/vis/runtime/vis_event.h"
 
 namespace mos::vis {
 
@@ -114,8 +115,6 @@ Status AsrStage::Process(SessionContext& context) {
               Kv("oldest", oldest)});
   }
 
-  // Check for timeout
-  HandleNoTextTimeout(context);
   if (context.state != SessionState::kListening &&
       context.state != SessionState::kFinalizing) {
     // Sub-state machine may have redirected to pre-listening/idle.
@@ -128,8 +127,8 @@ Status AsrStage::Process(SessionContext& context) {
     return st;
   }
 
-  // If we are finalizing, handle tail audio and finalize ASR
-  if (context.state == SessionState::kFinalizing) {
+  // If we are finalizing (v2) or state machine requested finalization, handle tail audio and finalize ASR
+  if (context.state == SessionState::kFinalizing || context.asr_state.should_finalize) {
     const std::size_t tail_samples = static_cast<std::size_t>(
         std::max(0, context.config.asr.tail_ms) *
         std::max(1, context.config.audio.sample_rate) / 1000);
@@ -141,23 +140,13 @@ Status AsrStage::Process(SessionContext& context) {
     if (!st.ok()) {
       return st;
     }
+    // Clear flag if it was set
+    context.asr_state.should_finalize = false;
   }
 
   return Status::Ok();
 }
 
-void AsrStage::HandleNoTextTimeout(SessionContext& context) {
-  const auto now = std::chrono::steady_clock::now();
-  auto& asr_state = context.asr_state;
-  if ((now - asr_state.last_text_update_time) >=
-      std::chrono::seconds(std::max(1, asr_state.no_text_timeout_seconds))) {
-    LogWarn(logevent::kAsrTimeout, MakeLogCtx(context),
-            {Kv("detail", "no_new_text_timeout"),
-             Kv("timeout_sec", asr_state.no_text_timeout_seconds)});
-    context.local_events.asr_events.push_back(subsm::AsrEvent::kAsrTimeout);
-    ConsumeAsrEvents(context, "");
-  }
-}
 
 Status AsrStage::ProcessAudioChunks(SessionContext& context) {
   auto& asr_state = context.asr_state;
@@ -281,32 +270,43 @@ void AsrStage::ConsumeAsrEvents(SessionContext& context, const std::string& fina
               Kv("action", static_cast<int>(decision.action)),
               Kv("final_text_empty", final_text.empty() ? 1 : 0)});
 
-    if (decision.action == subsm::AsrAction::kToRecognizing) {
-      context.state = SessionState::kRecognizing;
-      context.nlu_control_state.wake_pos_samples.reset();
-      context.asr_state.processed_samples = 0;
-      context.asr_state.last_partial_text.clear();
-      context.asr_state.has_pending_final_result = false;
-      continue;
+    // Map sub-state machine event to VisEvent for main state machine
+    VisEventType vis_type = VisEventType::kAsrFinalResult; // default
+    std::string vis_text = final_text;
+    switch (event) {
+      case subsm::AsrEvent::kAsrPartial:
+        // Partial results are not used for state transitions
+        continue;
+      case subsm::AsrEvent::kAsrFinalNonEmpty:
+        vis_type = VisEventType::kAsrFinalResult;
+        // vis_text already set to final_text
+        break;
+      case subsm::AsrEvent::kAsrFinalEmpty:
+        vis_type = VisEventType::kAsrFinalResult;
+        vis_text.clear();
+        break;
+      case subsm::AsrEvent::kAsrTimeout:
+      case subsm::AsrEvent::kAsrError:
+        vis_type = VisEventType::kAsrEndpointWithEmptyText;
+        vis_text.clear();
+        break;
+      default:
+        // Unknown event, ignore
+        continue;
     }
 
-    if (decision.action == subsm::AsrAction::kPrepareRetryReply) {
-      if (context.asr != nullptr && context.config.asr.enabled) {
-        Status st = context.asr->Reset();
-        if (!st.ok()) {
-          GetLogger()->warn("{}: ASR reset failed in retry path: {}", kLogTag, st.message());
-        }
-      }
-      context.nlu_control_state.wake_pos_samples.reset();
-      context.asr_state.processed_samples = 0;
-      context.asr_state.last_partial_text.clear();
-      context.asr_state.has_pending_final_result = false;
-      context.nlu_control_state.has_pending_asr_final_result = false;
-      context.nlu_control_state.pending_asr_final_result.reset();
-      context.state = SessionState::kPreListening;
-      ScheduleRetryReply(context);
-      continue;
+    // Queue event to main state machine
+    if (context.state_machine) {
+      VisEvent vis_event(vis_type, vis_text);
+      vis_event.source_stage = "AsrStage";
+      context.state_machine->QueueEvent(vis_event);
+    } else {
+      LogWarn(logevent::kAsrError, MakeLogCtx(context),
+              {Kv("detail", "no_state_machine_for_asr_event")});
     }
+
+    // Note: State transitions and cleanup are now handled by the state machine
+    // via actions (kStartAsrForCommand, kCleanupAsrAndRearmCommandWait, etc.)
   }
 }
 
